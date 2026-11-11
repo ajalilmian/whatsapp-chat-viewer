@@ -1207,6 +1207,7 @@
       const part = await loadPart(rec);
       hideToast();
       state.parts = state.parts.filter(p => p.rec.id !== rec.id); // importing the same file again replaces it
+      for (const [sig, c] of chatCache) if (c.parts.some(p => p.rec.id === rec.id)) chatCache.delete(sig); // or the old copy would be reused
       const twin = state.chats.find(c => c.key === lc(part.baseName) && !c.parts.some(p => p.rec.id === rec.id));
       if (twin && !settings.separate.includes(rec.id)) {
         const merge = opts && opts.merge != null ? opts.merge : await askMerge(twin, part);
@@ -1215,7 +1216,7 @@
       const before = twin ? twin.msgs.length : 0;
       state.parts.push(part);
       rebuildChats();
-      const chat = state.chats.find(c => c.parts.includes(part));
+      const chat = state.chats.find(c => c.parts.some(p => p.rec.id === rec.id));
       updateIntro();
       if (state.tab !== 'chats') setTab('chats');
       openChat(chat);
