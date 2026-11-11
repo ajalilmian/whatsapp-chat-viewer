@@ -2,10 +2,11 @@ services:
   chat-viewer:
     build: .
     container_name: whatsapp-chat-viewer
-    # Bound to this machine only, so your chats are not reachable from the network.
-    # Change to "8080:8080" if you want other devices on your network to open it.
+    # Bound to this machine only by default, so your chats are not reachable from the network.
+    # To open it to other devices on your network, put BIND_ADDRESS=0.0.0.0 in a .env file
+    # next to this one (and turn on the screen lock in Settings).
     ports:
-      - "127.0.0.1:8080:8080"
+      - "${BIND_ADDRESS:-127.0.0.1}:8080:8080"
     volumes:
       - chat-data:/data
     restart: unless-stopped

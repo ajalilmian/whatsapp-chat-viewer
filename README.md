@@ -93,7 +93,7 @@ Open <http://localhost:8080>. Imported chats, settings, photos and your custom b
 
 To stop it, run `docker compose down`. Add `-v` only if you also want to delete the saved chats.
 
-By default the port is bound to your own machine (`127.0.0.1`). To open the viewer from other devices on your network, change the port line in `docker-compose.yml` to `"8080:8080"` and turn on the screen lock in Settings.
+By default the port is bound to your own machine (`127.0.0.1`). To open the viewer from other devices on your network, create a `.env` file next to `docker-compose.yml` containing `BIND_ADDRESS=0.0.0.0`, run `docker compose up -d` again, and turn on the screen lock in Settings. Then browse to `http://<your computer's IP address>:8080`.
 
 ### Node.js (no install step)
 

@@ -9,3 +9,6 @@ assets/*.local.svg
 .claude/
 .DS_Store
 node_modules/
+
+# Local settings such as BIND_ADDRESS
+.env
