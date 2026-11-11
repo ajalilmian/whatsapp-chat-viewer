@@ -883,3 +883,6 @@ a.card:hover { filter: brightness(.97); }
   .insights .g-body { padding: 14px 12px 24px; }
   .select { max-width: 150px; }
 }
+
+/* Buttons that are only there to match the look */
+.deco, .deco:hover { opacity: .32; cursor: default; background: none; }

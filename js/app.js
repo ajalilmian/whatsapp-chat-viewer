@@ -1098,7 +1098,7 @@
   function setTab(tab) {
     state.tab = tab;
     closeSettings(true);
-    $('#side-title').textContent = { calls: 'Calls', memories: 'Memories' }[tab] || 'WhatsApp';
+    $('#side-title').textContent = { calls: 'Calls', memories: 'Memories' }[tab] || 'Chats';
     $('#chips').hidden = tab !== 'chats';
     $('#filter-btn').hidden = tab !== 'chats';
     $('#chat-filter').placeholder = tab === 'chats' ? 'Search or start a new chat' : 'Search name or number';
