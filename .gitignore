@@ -1,0 +1,11 @@
+# Private chat exports and saved chats must never be committed
+*.zip
+!sample/*.zip
+data/
+
+# A private wallpaper tile that overrides assets/chat-bg.svg when present
+assets/*.local.svg
+
+.claude/
+.DS_Store
+node_modules/

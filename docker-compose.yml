@@ -1,0 +1,15 @@
+services:
+  chat-viewer:
+    build: .
+    container_name: whatsapp-chat-viewer
+    # Bound to this machine only, so your chats are not reachable from the network.
+    # Change to "8080:8080" if you want other devices on your network to open it.
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - chat-data:/data
+    restart: unless-stopped
+
+volumes:
+  # Imported chats, settings and the custom background persist here.
+  chat-data:

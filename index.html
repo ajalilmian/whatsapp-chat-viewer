@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>WhatsApp Chat Viewer</title>
+<script>
+  (function () {
+    var saved = null;
+    try { saved = localStorage.getItem('wa-theme'); } catch (e) {}
+    var dark = saved ? saved === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+    document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  })();
+</script>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath fill='%2325d366' d='M16 3a13 13 0 0 0-11.200 19.600L3 29l6.600-1.700A13 13 0 1 0 16 3z'/%3E%3Cpath fill='%23fff' d='M10 12h12v2.200H10zm0 4.400h8v2.200h-8z'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="app">
+
+  <nav class="rail" aria-label="Navigation">
+    <div class="rail-top">
+      <button class="rail-btn on" id="rail-chats" title="Chats" data-icon="chats"></button>
+      <button class="rail-btn" id="rail-calls" title="Calls" data-icon="callOutline"></button>
+      <button class="rail-btn" title="Status" data-icon="status"></button>
+      <button class="rail-btn" title="Channels" data-icon="channels"></button>
+      <button class="rail-btn" title="Communities" data-icon="communities"></button>
+      <hr>
+      <button class="rail-btn" title="Business tools" data-icon="store"></button>
+      <button class="rail-btn" title="Advertise" data-icon="campaign"></button>
+    </div>
+    <div class="rail-bottom">
+      <button class="rail-btn" id="btn-media" title="Media" data-icon="media"></button>
+      <button class="rail-btn" id="btn-settings" title="Settings" data-icon="settings"></button>
+      <button class="rail-btn rail-avatar" id="btn-profile" title="Profile"><span class="avatar sm" data-avatar="person"></span></button>
+    </div>
+  </nav>
+
+  <aside class="side">
+    <header class="side-head">
+      <h1 id="side-title">WhatsApp</h1>
+      <div class="actions">
+        <button class="icon-btn" id="btn-side-menu" title="Menu" data-icon="menu"></button>
+        <button class="new-btn" id="btn-import" title="Import chat" data-icon="plus"></button>
+      </div>
+    </header>
+    <div class="side-search">
+      <label class="search-pill">
+        <span data-icon="search"></span>
+        <input id="chat-filter" type="text" placeholder="Search or start a new chat" autocomplete="off" spellcheck="false">
+      </label>
+    </div>
+    <div class="chips" id="chips">
+      <button class="chip on" data-filter="all">All</button>
+      <button class="chip" data-filter="unread">Unread</button>
+      <button class="chip" data-filter="favorites">Favorites</button>
+      <button class="chip" data-filter="groups">Groups<span class="n" id="groups-count"></span></button>
+      <button class="chip round" title="New list" data-icon="plus"></button>
+    </div>
+    <div class="chat-list" id="chat-list"></div>
+
+    <section class="drawer" id="settings" hidden>
+      <header class="drawer-head">
+        <button class="icon-btn" id="settings-close" title="Back" data-icon="back"></button>
+        <h2 id="settings-title">Settings</h2>
+        <button class="icon-btn" id="theme-reset" title="Reset chat theme" data-icon="refresh" hidden></button>
+      </header>
+      <div class="drawer-body" id="settings-body"></div>
+    </section>
+  </aside>
+
+  <main class="main">
+    <section class="intro" id="intro">
+      <div class="intro-card">
+        <div class="intro-art" data-icon="introart"></div>
+        <h2 id="intro-title">Import a WhatsApp chat</h2>
+        <p id="intro-text"></p>
+        <button class="soft-btn" id="intro-import">Choose .zip file</button>
+      </div>
+      <div class="intro-tiles">
+        <button class="tile" id="tile-import"><span data-icon="doc"></span><em>Import chat</em></button>
+        <button class="tile" id="tile-media"><span data-icon="media"></span><em>All media</em></button>
+        <button class="tile" id="tile-settings"><span data-icon="settings"></span><em>Settings</em></button>
+        <button class="tile" id="tile-theme"><span data-icon="theme"></span><em>Switch theme</em></button>
+      </div>
+      <div class="intro-foot"><span data-icon="lock"></span><span id="intro-foot-text">Your chats never leave this device. Everything is read in your browser.</span></div>
+    </section>
+
+    <section class="convo" id="theme-preview" hidden>
+      <header class="convo-head center"><span class="name">Theme preview</span></header>
+      <div class="stage">
+        <div class="wallpaper"></div>
+        <div class="scroller"><div class="msgs" id="preview-msgs"></div></div>
+      </div>
+    </section>
+
+    <section class="convo" id="convo" hidden>
+      <header class="convo-head">
+        <button class="icon-btn back" id="btn-back" title="Back" data-icon="back"></button>
+        <button class="convo-id" id="convo-id" title="Media, links and docs">
+          <span class="avatar md" id="convo-avatar" data-avatar="person"></span>
+          <span class="convo-title">
+            <span class="name" id="convo-name"></span>
+            <span class="sub" id="convo-sub"></span>
+          </span>
+        </button>
+        <div class="actions">
+          <button class="icon-btn hide-sm" title="Video call" data-icon="video"></button>
+          <button class="icon-btn hide-sm" title="Voice call" data-icon="callOutline"></button>
+          <button class="icon-btn" id="btn-search" title="Search" data-icon="search"></button>
+          <button class="icon-btn" id="btn-chat-menu" title="Menu" data-icon="menu"></button>
+        </div>
+      </header>
+
+      <div class="stage">
+        <div class="wallpaper"></div>
+        <div class="scroller" id="scroller" tabindex="0">
+          <div class="msgs" id="msgs"></div>
+        </div>
+        <div class="float-date" id="float-date"><span></span></div>
+        <button class="to-bottom" id="to-bottom" title="Scroll to bottom" data-icon="down" hidden></button>
+        <footer class="composer">
+          <div class="composer-pill">
+            <button class="icon-btn" title="Attach" data-icon="plus"></button>
+            <button class="icon-btn" title="Emojis, GIFs, stickers" data-icon="emoji"></button>
+            <input type="text" placeholder="Type a message" autocomplete="off" spellcheck="false" aria-label="Type a message">
+            <button class="icon-btn" title="Voice message" data-icon="mic"></button>
+          </div>
+        </footer>
+      </div>
+    </section>
+  </main>
+
+  <aside class="panel" id="search-panel" hidden>
+    <header class="panel-head">
+      <button class="icon-btn" id="search-close" title="Close" data-icon="close"></button>
+      <h2>Search messages</h2>
+    </header>
+    <div class="panel-search">
+      <label class="date-btn icon-btn" title="Jump to date">
+        <span data-icon="calendar"></span>
+        <input type="date" id="jump-date">
+      </label>
+      <label class="search-pill">
+        <span data-icon="search"></span>
+        <input id="search-input" type="text" placeholder="Search" autocomplete="off" spellcheck="false">
+      </label>
+    </div>
+    <div class="panel-body" id="search-results"></div>
+  </aside>
+
+  <aside class="panel gallery" id="info-panel" hidden>
+    <header class="panel-head">
+      <button class="icon-btn g-close" title="Back" data-icon="back"></button>
+      <h2>Media, links and docs</h2>
+      <button class="icon-btn g-sort" title="Filter and sort" data-icon="sort"></button>
+    </header>
+    <div class="g-tabs">
+      <button data-tab="media">Media</button>
+      <button data-tab="docs">Docs</button>
+      <button data-tab="links">Links</button>
+    </div>
+    <div class="g-body"></div>
+  </aside>
+</div>
+
+<div class="media-wrap" id="media-modal" hidden>
+  <div class="media-dialog gallery">
+    <header class="media-head">
+      <div class="media-title"><div class="name">Media</div><div class="sub">Media from all chats</div></div>
+      <div class="g-tabs">
+        <button data-tab="media">Media</button>
+        <button data-tab="docs">Docs</button>
+        <button data-tab="links">Links</button>
+      </div>
+      <div class="actions">
+        <button class="icon-btn g-sort" title="Filter and sort" data-icon="sort"></button>
+        <button class="icon-btn g-close" title="Close" data-icon="close"></button>
+      </div>
+    </header>
+    <div class="g-body"></div>
+  </div>
+</div>
+
+<div class="lightbox" id="lightbox" hidden>
+  <header class="lb-head">
+    <span class="avatar md" id="lb-avatar" data-avatar="person"></span>
+    <div class="lb-title"><div class="name" id="lb-name"></div><div class="sub" id="lb-sub"></div></div>
+    <div class="actions">
+      <button class="icon-btn" id="lb-goto" title="Go to message" data-icon="gotomsg"></button>
+      <a class="icon-btn" id="lb-download" title="Download" data-icon="download"></a>
+      <button class="icon-btn" id="lb-close" title="Close" data-icon="close"></button>
+    </div>
+  </header>
+  <div class="lb-stage">
+    <button class="lb-nav prev" id="lb-prev" title="Previous" data-icon="left"></button>
+    <div class="lb-media" id="lb-media"></div>
+    <button class="lb-nav next" id="lb-next" title="Next" data-icon="right"></button>
+  </div>
+  <div class="lb-caption" id="lb-caption"></div>
+</div>
+
+<div class="modal-wrap" id="modal" hidden><div class="modal" id="modal-box"></div></div>
+<div class="drop-veil" id="drop-veil" hidden><div><span data-icon="download"></span>Drop the exported chat to import it</div></div>
+<div class="toast" id="toast" hidden></div>
+<input type="file" id="file-input" accept=".zip,.txt,application/zip,text/plain" multiple hidden>
+<input type="file" id="wall-input" accept="image/*" hidden>
+
+<script src="js/icons.js"></script>
+<script src="js/zip.js"></script>
+<script src="js/store.js"></script>
+<script src="js/parser.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

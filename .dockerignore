@@ -1,0 +1,11 @@
+**/*.zip
+data
+docs
+sample
+tools
+.claude
+.git
+.gitignore
+README.md
+Dockerfile
+docker-compose.yml
