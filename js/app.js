@@ -1870,6 +1870,11 @@
         else if (!dom.searchPanel.hidden) closeSearch();
         else if (!dom.infoPanel.hidden) closeGallery(dom.infoPanel);
         else if (!$('#contact-panel').hidden) closePanels();
+        else if (!$('#filter-pop').hidden) $('#filter-pop').hidden = true;
+        else if (view.chat) closeChat();
+        else if (state.query) { state.query = ''; $('#chat-filter').value = ''; renderList(); }
+        else if (state.tab !== 'chats') setTab('chats');
+        if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
       } else if (!dom.lightbox.hidden && e.key === 'ArrowLeft') stepLightbox(-1);
       else if (!dom.lightbox.hidden && e.key === 'ArrowRight') stepLightbox(1);
     });
