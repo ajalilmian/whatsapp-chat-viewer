@@ -12,7 +12,7 @@ It is **view only**, runs entirely on your own machine, and has **no dependencie
 
 **Reading chats**
 
-- **Looks like WhatsApp Web** in light and dark mode, on desktop and phone-sized screens.
+- **Looks like WhatsApp Web** in light and dark mode. On phones it switches to a single-column layout with a bottom tab bar like the Android app.
 - **Imports the export .zip directly.** Drag it in; nothing to unzip or convert.
 - **Every message type an export contains**: text with formatting and links, photos, videos, GIFs, stickers, voice messages, documents, contact cards, locations, polls, calls, edited and deleted messages, and group events.
 - **Voice messages** with a real waveform, scrubbing and 1×, 1.5×, 2× speed.
@@ -25,6 +25,8 @@ It is **view only**, runs entirely on your own machine, and has **no dependencie
 - **Media, links and docs** for one chat or all chats, with sorting, filters, multi-select, download and star.
 - **Starred messages**: star anything and find it again in one list.
 - **Calls tab** listing every call found in your chats.
+- **Favorites**: mark chats as favorites and filter the list to them.
+- **Chat menu**: hover a chat in the list (or right-click it) for favorites, info, media, insights and delete.
 
 **Going further**
 
@@ -65,19 +67,17 @@ It is **view only**, runs entirely on your own machine, and has **no dependencie
 | --- | --- |
 | ![Contact info](docs/screenshots/contact.jpg) | ![Choosing a chat theme](docs/screenshots/themes.jpg) |
 
-| Calls | Dark mode |
+| Chat menu and favorites | Calls |
 | --- | --- |
-| ![Call history](docs/screenshots/calls.jpg) | ![Dark mode](docs/screenshots/chat-dark.jpg) |
+| ![The menu on a chat in the list](docs/screenshots/row-menu.jpg) | ![Call history](docs/screenshots/calls.jpg) |
 
-| Settings | Screen lock |
+| Dark mode | Settings |
 | --- | --- |
-| ![Settings](docs/screenshots/settings.jpg) | ![Screen lock](docs/screenshots/lock.jpg) |
+| ![Dark mode](docs/screenshots/chat-dark.jpg) | ![Settings](docs/screenshots/settings.jpg) |
 
-<p align="center">
-  <img src="docs/screenshots/mobile-list.jpg" alt="Chat list on a phone" width="260">
-  &nbsp;&nbsp;
-  <img src="docs/screenshots/mobile-chat.jpg" alt="A chat on a phone" width="260">
-</p>
+| Screen lock | On a phone |
+| --- | --- |
+| ![Screen lock](docs/screenshots/lock.jpg) | <img src="docs/screenshots/mobile-list.jpg" alt="Chat list on a phone" width="230"> <img src="docs/screenshots/mobile-chat.jpg" alt="A chat on a phone" width="230"> |
 
 ## Run it
 
@@ -143,6 +143,9 @@ Want to try it first? Import the two fictional chats in [`sample/`](sample).
 - **Insights:** the chart icon in the left rail. Click a day in the heatmap to open it in the chat.
 - **Memories:** the clock icon in the left rail.
 - **Calls:** the phone icon in the left rail. Click a call to see it in context.
+- **Chat menu and favorites:** hover a chat in the list and click the arrow that appears, or right-click it. Favorited chats show under the **Favorites** filter.
+- **Escape** closes whatever is on top, then the open chat, and brings you back to the start screen.
+- **On a phone:** the same sections are in the tab bar along the bottom.
 - **Themes:** **Settings → Chat theme**.
 - **Screen lock and link previews:** both under **Settings**.
 - **Help:** **Settings → How to use** repeats these steps inside the app.
@@ -151,7 +154,7 @@ Want to try it first? Import the two fictional chats in [`sample/`](sample).
 
 ## Good to know
 
-- **View only.** The message box, call buttons and a few rail icons (Status, Channels, Communities) are there to match the look; they do nothing.
+- **View only.** The message box, and the greyed-out call buttons and rail icons (Status, Channels, Communities), are there to match the look; they do nothing.
 - **What an export does not contain.** WhatsApp leaves out reactions, which message a reply was to, read receipts, forwarded labels and profile photos, so the viewer cannot show them.
 - **Merging relies on timestamps.** Two exports of the same chat line up when they were made on phones set to the same time zone and clock format. If not, messages may appear twice.
 - **Tested mostly with iPhone exports.** Android's export format is supported by the parser but has had less testing. If a chat does not load correctly, please open an issue with a few anonymised lines of the `.txt` file.
@@ -161,7 +164,7 @@ Want to try it first? Import the two fictional chats in [`sample/`](sample).
 
 - Your chats stay in the folder or Docker volume you run the viewer from. Nothing is uploaded to any third party.
 - **Link previews are the one feature that contacts the internet.** When switched on, the viewer's server fetches the title and picture of links that appear in your chats, which tells those sites that someone looked the link up. It is off by default, only public web addresses are fetched, and results are cached in the data folder.
-- **Screen lock.** With a password set, the server will not return chats, media or settings until it is entered. The password is stored as a salted hash. Chats on disk are not encrypted, so the lock protects access through the viewer, not the files themselves.
+- **Screen lock.** The password is asked once per browser session: on first opening, after the browser is closed, after **Lock now**, or after the server restarts. A page refresh does not ask again. With a password set, the server will not return chats, media or settings until it is entered. The password is stored as a salted hash. Chats on disk are not encrypted, so the lock protects access through the viewer, not the files themselves.
 - The server has no other login, which is why it listens on `127.0.0.1` by default.
 - The `.gitignore` excludes `*.zip` and `data/` so a real export cannot be committed by accident if you fork this.
 
