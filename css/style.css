@@ -892,3 +892,20 @@ a.card:hover { filter: brightness(.97); }
 .row-menu svg { width: 22px; height: 22px; flex: none; }
 .chat-item:hover .row-menu, .chat-item:focus-visible .row-menu { width: 22px; }
 .row-menu:hover { color: var(--text); }
+
+/* Phone width: the rail becomes a bottom tab bar on the list screen */
+@media (max-width: 760px) {
+  .rail {
+    display: flex; position: fixed; left: 0; right: 0; bottom: 0; z-index: 20; flex: none; flex-direction: row; justify-content: space-around; align-items: center;
+    height: calc(58px + env(safe-area-inset-bottom)); padding: 0 6px env(safe-area-inset-bottom); border-right: 0; border-top: 1px solid var(--line);
+  }
+  .rail-top, .rail-bottom { flex-direction: row; gap: 0; flex: 1; justify-content: space-around; }
+  .rail-top { flex: 4; }
+  .rail-bottom { flex: 3; }
+  .rail hr, .rail .deco { display: none; }
+  .rail-btn { width: 46px; height: 40px; border-radius: 20px; }
+  body.chat-open .rail { display: none; }
+  .side { padding-bottom: calc(58px + env(safe-area-inset-bottom)); }
+  .drawer { bottom: calc(58px + env(safe-area-inset-bottom)); }
+  .intro-foot { display: none; }
+}
