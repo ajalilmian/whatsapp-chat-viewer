@@ -34,6 +34,7 @@
     chatThemes: {},    // per-chat theme overrides, by chat key
     starred: {},       // starred message keys, by chat key
     contacts: {},      // custom names and photos, by chat key ('@me' is you)
+    favorites: [],     // chat keys marked as favourites
     separate: [],      // imported files the user chose not to merge with a same-named chat
     linkPreviews: false,
   };
@@ -1045,7 +1046,8 @@
     let chats = state.chats.slice().sort((a, b) => lastTs(b) - lastTs(a));
     if (q) chats = chats.filter(c => c.name.toLowerCase().includes(q));
     if (state.filter === 'groups') chats = chats.filter(c => c.isGroup);
-    if (state.filter === 'unread' || state.filter === 'favorites') chats = [];
+    if (state.filter === 'favorites') chats = chats.filter(c => settings.favorites.includes(c.key));
+    if (state.filter === 'unread') chats = [];
     dom.list.textContent = '';
     if (!chats.length) {
       const msg = !state.chats.length ? 'No chats yet.<br>Import an exported WhatsApp chat to get started.'
@@ -1060,10 +1062,34 @@
       const b = el('button', 'chat-item' + (chat === view.chat ? ' on' : ''),
         avatarHTML(chat, 'lg') +
         '<span class="body"><span class="top"><span class="name">' + esc(chat.name) + '</span><span class="when">' + esc(listWhen(last, chat)) + '</span></span>' +
-        '<span class="bottom"><span class="preview">' + previewHTML(chat, last) + '</span></span></span>');
-      b.addEventListener('click', () => openChat(chat));
+        '<span class="bottom"><span class="preview">' + previewHTML(chat, last) + '</span>' +
+        '<span class="row-menu" title="Chat options">' + ICON.down + '</span></span></span>');
+      b.addEventListener('click', e => {
+        const chev = e.target.closest('.row-menu');
+        if (chev) { e.stopPropagation(); chatRowMenu(chev, chat); } else openChat(chat);
+      });
+      b.addEventListener('contextmenu', e => { e.preventDefault(); chatRowMenu(b.querySelector('.row-menu'), chat); });
       dom.list.appendChild(b);
     }
+  }
+
+  // The menu behind the chevron that appears when hovering a chat in the list.
+  function chatRowMenu(anchor, chat) {
+    const fav = settings.favorites.includes(chat.key);
+    openMenu(anchor, [
+      { label: fav ? 'Remove from favorites' : 'Add to favorites', run: () => {
+        settings.favorites = fav ? settings.favorites.filter(k => k !== chat.key) : settings.favorites.concat(chat.key);
+        saveSettings();
+        renderList();
+        toast(fav ? 'Removed from favorites' : 'Added to favorites');
+      } },
+      { label: chat.isGroup ? 'Group info' : 'Contact info', run: () => { if (view.chat !== chat) openChat(chat); openInfo(); } },
+      { label: 'Media, links and docs', run: () => { if (view.chat !== chat) openChat(chat); openGallery('chat', 'media'); } },
+      { label: 'Starred messages', run: () => openStarred(chat) },
+      { label: 'Chat insights', run: () => openInsights(chat) },
+      '-',
+      { label: 'Delete chat', danger: true, run: () => confirmBox('Delete this chat?', '“' + chat.name + '” will be removed from this viewer. Your exported file is not touched.', 'Delete chat', () => removeChat(chat)) },
+    ]);
   }
 
   function renderCalls() {
@@ -1883,6 +1909,7 @@
         if (saved[k] && typeof saved[k] === 'object' && !Array.isArray(saved[k])) Object.assign(settings[k], saved[k]);
       }
       if (Array.isArray(saved.separate)) settings.separate = saved.separate;
+      if (Array.isArray(saved.favorites)) settings.favorites = saved.favorites;
       settings.linkPreviews = !!saved.linkPreviews;
     } catch (e) { console.warn('Settings unavailable', e); }
     try { await Store.loadFiles(); } catch (e) { /* photos are optional */ }

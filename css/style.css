@@ -886,3 +886,9 @@ a.card:hover { filter: brightness(.97); }
 
 /* Buttons that are only there to match the look */
 .deco, .deco:hover { opacity: .32; cursor: default; background: none; }
+
+/* Chevron that slides in when a chat row is hovered */
+.row-menu { flex: none; width: 0; height: 20px; overflow: hidden; display: inline-flex; align-items: center; justify-content: center; color: var(--text-2); transition: width .12s; border-radius: 50%; }
+.row-menu svg { width: 22px; height: 22px; flex: none; }
+.chat-item:hover .row-menu, .chat-item:focus-visible .row-menu { width: 22px; }
+.row-menu:hover { color: var(--text); }
