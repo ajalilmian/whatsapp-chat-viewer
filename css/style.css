@@ -893,19 +893,28 @@ a.card:hover { filter: brightness(.97); }
 .chat-item:hover .row-menu, .chat-item:focus-visible .row-menu { width: 22px; }
 .row-menu:hover { color: var(--text); }
 
-/* Phone width: the rail becomes a bottom tab bar on the list screen */
+/* Phone width: the rail becomes a bottom navigation bar like the Android app's,
+   with a label under each icon and a pill behind the active one. */
 @media (max-width: 760px) {
   .rail {
-    display: flex; position: fixed; left: 0; right: 0; bottom: 0; z-index: 20; flex: none; flex-direction: row; justify-content: space-around; align-items: center;
-    height: calc(58px + env(safe-area-inset-bottom)); padding: 0 6px env(safe-area-inset-bottom); border-right: 0; border-top: 1px solid var(--line);
+    --nav-h: 76px;
+    display: flex; position: fixed; left: 0; right: 0; bottom: 0; z-index: 20; flex: none; flex-direction: row; align-items: stretch;
+    height: calc(var(--nav-h) + env(safe-area-inset-bottom)); padding: 0 4px env(safe-area-inset-bottom);
+    background: var(--side-bg); border-right: 0; border-top: 1px solid var(--line);
   }
-  .rail-top, .rail-bottom { flex-direction: row; gap: 0; flex: 1; justify-content: space-around; }
-  .rail-top { flex: 4; }
-  .rail-bottom { flex: 3; }
-  .rail hr, .rail .deco { display: none; }
-  .rail-btn { width: 46px; height: 40px; border-radius: 20px; }
+  .rail-top, .rail-bottom { display: contents; }
+  .rail hr, .rail .deco, #btn-media, #btn-profile { display: none; }
+  .rail-btn, .rail-btn:hover, .rail-btn.on {
+    flex: 1; width: auto; height: auto; border-radius: 0; background: none; flex-direction: column; justify-content: center; gap: 4px;
+    color: var(--text); -webkit-tap-highlight-color: transparent;
+  }
+  .rail-btn svg { width: 64px; height: 32px; padding: 4px 20px; border-radius: 16px; transition: background .15s; }
+  .rail-btn::after { content: attr(data-label); font-size: 12px; line-height: 16px; font-weight: 500; }
+  .rail-btn.on svg { background: #d8fdd2; color: #15603e; }
+  :root[data-theme="dark"] .rail-btn.on svg { background: #103529; color: #d9fdd3; }
+  .rail-btn.on::after { font-weight: 700; }
   body.chat-open .rail { display: none; }
-  .side { padding-bottom: calc(58px + env(safe-area-inset-bottom)); }
-  .drawer { bottom: calc(58px + env(safe-area-inset-bottom)); }
+  .side { padding-bottom: calc(76px + env(safe-area-inset-bottom)); }
+  .drawer { bottom: calc(76px + env(safe-area-inset-bottom)); }
   .intro-foot { display: none; }
 }
