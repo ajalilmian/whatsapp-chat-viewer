@@ -1,6 +1,5 @@
 /* WhatsApp chat export viewer. Read-only: chats are parsed and shown in the browser. */
-(function () {
-  'use strict';
+'use strict';
 
   // ---------------------------------------------------------------- helpers
   const $ = (sel, root) => (root || document).querySelector(sel);
@@ -32,6 +31,11 @@
     me: '',            // your name as it appears in exports; '' = work it out per chat
     theme: '',         // '', 'light' or 'dark'
     chat: { id: 'default', bubble: '', wall: '', doodles: true, image: false },
+    chatThemes: {},    // per-chat theme overrides, by chat key
+    starred: {},       // starred message keys, by chat key
+    contacts: {},      // custom names and photos, by chat key ('@me' is you)
+    separate: [],      // imported files the user chose not to merge with a same-named chat
+    linkPreviews: false,
   };
   let customWall = null; // URL of the user's own background image, when one is saved
 
@@ -154,8 +158,22 @@
     return v;
   }
 
+  // The theme in force: the open chat's own theme if it has one, else the default.
+  const themeChoice = () => (view.chat && settings.chatThemes[view.chat.key]) || settings.chat;
+  // The theme the Chat theme page is editing ("All chats" or "Only this chat").
+  function themeTarget(create) {
+    const chat = view.chat;
+    if (drawer.themeScope === 'chat' && chat) {
+      if (!settings.chatThemes[chat.key] && create) {
+        const g = settings.chat;
+        settings.chatThemes[chat.key] = { id: g.id, bubble: g.bubble, wall: g.wall, doodles: g.doodles, image: false };
+      }
+      return settings.chatThemes[chat.key] || settings.chat;
+    }
+    return settings.chat;
+  }
   function applyChatTheme() {
-    const v = themeVars(settings.chat, root.dataset.theme === 'dark');
+    const v = themeVars(themeChoice(), root.dataset.theme === 'dark');
     for (const k of THEME_KEYS) {
       if (v[k] == null) root.style.removeProperty(k); else root.style.setProperty(k, v[k]);
     }
@@ -177,9 +195,9 @@
   }
 
   // ---------------------------------------------------------------- state
-  const state = { chats: [], filter: 'all', query: '', tab: 'chats' };
+  const state = { parts: [], chats: [], filter: 'all', query: '', tab: 'chats' };
   const view = { chat: null, lo: 0, hi: 0 };
-  const drawer = { view: 'main' };
+  const drawer = { view: 'main', themeScope: 'all' };
   const CHUNK = 120, INITIAL = 160, MAX_ROWS = 1200, BARS = 40;
 
   const dom = {
@@ -249,31 +267,80 @@
     return n || 'WhatsApp chat';
   }
 
-  async function buildChat(rec) {
-    const chat = {
-      id: rec.id, fileName: rec.fileName, addedAt: rec.addedAt, size: rec.size,
-      zip: null, files: new Map(), urls: new Map(), ratios: new Map(), peaks: new Map(), peakJobs: new Map(),
-    };
+  function hash32(str) {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
+    return h;
+  }
+
+  // One imported file. Parts that share a chat name are shown as a single merged chat.
+  async function loadPart(rec) {
+    const part = { rec, zip: null, files: new Map() };
     let text, txtName = null;
     if (/\.txt$/i.test(rec.fileName)) {
       text = await (await rec.source.blob(0, rec.source.size, 'text/plain')).text();
     } else {
-      chat.zip = await Zip.open(rec.source);
-      const names = [...chat.zip.entries.keys()];
+      part.zip = await Zip.open(rec.source);
+      const names = [...part.zip.entries.keys()];
       txtName = names.find(n => /(^|\/)_chat\.txt$/i.test(n)) ||
         names.find(n => /\.txt$/i.test(n) && !n.includes('/')) ||
         names.find(n => /\.txt$/i.test(n));
       if (!txtName) throw new Error('No chat text found in "' + rec.fileName + '". Is it a WhatsApp export?');
-      text = await chat.zip.text(txtName);
-      for (const n of names) if (n !== txtName) chat.files.set(norm(n), n);
+      text = await part.zip.text(txtName);
+      for (const n of names) if (n !== txtName) part.files.set(norm(n), n);
     }
-
     const parsed = WAParser.parse(text);
     if (!parsed.messages.length) throw new Error('No messages found in "' + rec.fileName + '".');
-    chat.msgs = parsed.messages;
-    chat.senders = parsed.senders;
-    chat.monthFirst = parsed.monthFirst;
-    chat.baseName = baseNameFrom(rec.fileName, txtName);
+    part.msgs = parsed.messages;
+    part.monthFirst = parsed.monthFirst;
+    part.baseName = baseNameFrom(rec.fileName, txtName);
+    return part;
+  }
+  const partKey = part => (settings.separate.includes(part.rec.id) ? lc(part.baseName) + '|' + part.rec.id : lc(part.baseName));
+
+  // Combines several exports of one chat. A message present in more than one export is kept
+  // once; where one export left media out and another has it, the one with the file wins.
+  function mergeMessages(parts, fileMap) {
+    let out;
+    if (parts.length === 1) out = parts[0].msgs;
+    else {
+      const seen = new Map();
+      out = [];
+      const has = m => !!(m.file && fileMap.has(norm(m.file)));
+      for (const part of parts) {
+        const nth = new Map();
+        for (const m of part.msgs) {
+          const what = m.type === 'system' ? 's' + m.text : (m.file || m.type === 'omitted') ? 'media' : m.type + '|' + (m.text || '');
+          let k = m.ts + '|' + (m.sender || '') + '|' + what;
+          const n = (nth.get(k) || 0) + 1;
+          nth.set(k, n);
+          k += '#' + n;
+          const prev = seen.get(k);
+          if (!prev) { seen.set(k, m); out.push(m); }
+          else if (has(m) && !has(prev)) Object.assign(prev, m);
+        }
+      }
+      out.sort((a, b) => a.ts - b.ts);
+    }
+    out.forEach((m, k) => { m.i = k; m.lc = undefined; });
+    return out;
+  }
+
+  const chatCache = new Map();
+  function assembleChat(parts) {
+    parts = parts.slice().sort((a, b) => a.rec.addedAt - b.rec.addedAt);
+    const sig = parts.map(p => p.rec.id).join('+');
+    const cached = chatCache.get(sig);
+    if (cached) return cached;
+    const chat = {
+      id: parts[0].rec.id, sig, key: partKey(parts[0]), parts,
+      size: parts.reduce((n, p) => n + (p.rec.size || 0), 0),
+      fileMap: new Map(), urls: new Map(), ratios: new Map(), peaks: new Map(), peakJobs: new Map(),
+    };
+    for (const p of parts) for (const [k, entry] of p.files) if (!chat.fileMap.has(k)) chat.fileMap.set(k, { zip: p.zip, entry });
+    chat.msgs = mergeMessages(parts, chat.fileMap);
+    chat.monthFirst = parts[0].monthFirst;
+    chat.baseName = parts[0].baseName;
     chat.name = chat.baseName;
     chat.me = null;
     chat.counts = new Map();
@@ -296,11 +363,92 @@
         if (urls) { chat.links.push(m.i); chat.linkMap.set(m.i, urls); }
       }
     }
+    chat.senders = [...chat.counts.entries()].sort((a, b) => b[1] - a[1]).map(e => e[0]);
     chat.isGroup = chat.senders.length > 2 || groupish;
     chat.colors = new Map();
     const palette = ['#1f7aec', '#e542a3', '#02a698', '#d1731b', '#7f66ff', '#c4532d', '#0e8f5a', '#b04ecf', '#d4504e', '#3b8ea5'];
     chat.senders.forEach((name, k) => chat.colors.set(name, palette[k % palette.length]));
+    chatCache.set(sig, chat);
     return chat;
+  }
+
+  // Regroups every imported file into chats (same-named exports merge) and keeps the open chat open.
+  function rebuildChats() {
+    const groups = new Map();
+    for (const p of state.parts) {
+      const k = partKey(p);
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(p);
+    }
+    const open = view.chat;
+    state.chats = [...groups.values()].map(assembleChat);
+    for (const sig of [...chatCache.keys()]) if (!state.chats.some(c => c.sig === sig)) chatCache.delete(sig);
+    applyIdentities();
+    if (open && !state.chats.includes(open)) {
+      const same = state.chats.find(c => c.key === open.key);
+      if (same) openChat(same); else closeChat();
+    }
+  }
+
+  // ---- stars
+  function msgKey(m) { return m.ts + ':' + hash32((m.sender || '') + '|' + m.type + '|' + (m.text || '').slice(0, 80)).toString(36); }
+  function starSet(chat) { return chat._stars || (chat._stars = new Set(settings.starred[chat.key] || [])); }
+  const isStarred = (chat, m) => !!chat.key && starSet(chat).has(msgKey(m));
+  function setStar(chat, m, on) {
+    const set = starSet(chat), k = msgKey(m);
+    if (on) set.add(k); else set.delete(k);
+    if (set.size) settings.starred[chat.key] = [...set]; else delete settings.starred[chat.key];
+  }
+  function rerenderRow(chat, i) {
+    if (view.chat !== chat) return;
+    const old = dom.msgs.querySelector('.row[data-i="' + i + '"]');
+    if (!old) return;
+    const fresh = renderMsg(chat, chat.msgs[i], chat.msgs[i - 1]);
+    old.replaceWith(fresh);
+    observeAll([fresh]);
+    syncVoice();
+  }
+  function toggleStar(chat, m) {
+    setStar(chat, m, !isStarred(chat, m));
+    saveSettings();
+    rerenderRow(chat, m.i);
+  }
+
+  // ---- avatars
+  const TINTS = ['#e0294a', '#1fa855', '#e2930a', '#1a7fe0', '#7a4fe0', '#0f9d94', '#d6336c', '#c2410c'];
+  function initials(name) {
+    const words = String(name).replace(/[^\p{L}\p{N} ]/gu, ' ').trim().split(/\s+/);
+    if (!words[0] || !/\p{L}/u.test(words[0][0])) return '';
+    return ([...words[0]][0] + (words[1] ? [...words[1]][0] : '')).toUpperCase();
+  }
+  const photoName = key => (key === '@me' ? 'av-me' : 'av-' + hash32(key).toString(16));
+  function photoOf(key) {
+    const c = settings.contacts[key];
+    return c && c.photo ? Store.fileURL(photoName(key), c.photo) : null;
+  }
+  function avatarShell(cls, inner, tint) {
+    return '<span class="avatar ' + (tint ? 'tint ' : '') + (cls || '') + '"' + (tint ? ' style="--av:' + tint + '"' : '') + '>' + inner + '</span>';
+  }
+  function avatarHTML(chat, cls) {
+    const url = photoOf(chat.key);
+    if (url) return avatarShell(cls, '<img src="' + esc(url) + '" alt="" draggable="false">');
+    const ini = chat.isGroup ? '' : initials(chat.name);
+    return avatarShell(cls, ini ? '<b>' + esc(ini) + '</b>' : ICON[chat.isGroup ? 'group' : 'person'], TINTS[hash32(chat.key) % TINTS.length]);
+  }
+  function meAvatarHTML(cls) {
+    const url = photoOf('@me');
+    return avatarShell(cls, url ? '<img src="' + esc(url) + '" alt="" draggable="false">' : ICON.person);
+  }
+  function senderAvatar(chat, sender, cls) {
+    if (chat.me && sender === chat.me) return meAvatarHTML(cls);
+    if (!chat.isGroup) return avatarHTML(chat, cls);
+    const ini = initials(sender || '');
+    return avatarShell(cls, ini ? '<b>' + esc(ini) + '</b>' : ICON.person, chat.colors.get(sender) || TINTS[0]);
+  }
+  function refreshAvatars() {
+    $('#me-avatar').innerHTML = meAvatarHTML('sm');
+    if (view.chat) $('#convo-avatar').innerHTML = avatarHTML(view.chat, 'md');
+    renderList();
   }
 
   // Works out which sender is "you" in every chat. A name picked in Settings wins;
@@ -328,18 +476,22 @@
       if (!chat.me && common) chat.me = chat.senders.find(x => lc(x) === lc(common)) || null;
       const s = chat.senders;
       chat.name = (!chat.isGroup && s.length === 2 && chat.me) ? s.find(x => x !== chat.me) : chat.baseName;
+      const custom = settings.contacts[chat.key];
+      if (custom && custom.name) chat.name = custom.name;
       chat.visualItems = null;
     }
   }
 
-  function hasFile(chat, file) { return !!(chat.zip && file && chat.files.has(norm(file))); }
-  function fileSize(chat, file) { const e = chat.zip && chat.zip.entries.get(chat.files.get(norm(file))); return e ? e.size : 0; }
-  function mediaBlob(chat, file) { return chat.zip.blob(chat.files.get(norm(file)), MIME[extOf(file)] || ''); }
+  const fileRef = (chat, file) => (file && chat.fileMap ? chat.fileMap.get(norm(file)) : null);
+  function hasFile(chat, file) { return !!fileRef(chat, file); }
+  function fileSize(chat, file) { const r = fileRef(chat, file); const e = r && r.zip.entries.get(r.entry); return e ? e.size : 0; }
+  function mediaBlob(chat, file) { const r = fileRef(chat, file); return r.zip.blob(r.entry, MIME[extOf(file)] || ''); }
   function mediaURL(chat, file) {
     const key = norm(file);
     let p = chat.urls.get(key);
     if (!p) {
-      p = chat.zip.url(chat.files.get(key), MIME[extOf(file)] || 'application/octet-stream');
+      const r = fileRef(chat, file);
+      p = r.zip.url(r.entry, MIME[extOf(file)] || 'application/octet-stream');
       chat.urls.set(key, p);
     }
     return p;
@@ -384,11 +536,15 @@
   const OMIT_LABEL = { image: 'Photo', video: 'Video', audio: 'Audio', gif: 'GIF', sticker: 'Sticker', document: 'Document', 'contact card': 'Contact card', 'video note': 'Video note', media: 'Media', contact: 'Contact card' };
   const OMIT_ICON = { image: 'image', video: 'videoFill', gif: 'videoFill', 'video note': 'videoFill', audio: 'headset', document: 'doc', 'contact card': 'person', contact: 'person' };
 
-  function metaHTML(m, out) {
-    return '<span class="meta">' + (m.edited ? '<span>Edited</span>' : '') + '<span>' + m.time + '</span>' + (out ? ICON.ticks : '') + '</span>';
+  function metaHTML(m, out, chat) {
+    const star = chat && isStarred(chat, m);
+    return '<span class="meta">' + (star ? '<span class="st">' + ICON.star + '</span>' : '') + (m.edited ? '<span>Edited</span>' : '') +
+      '<span>' + m.time + '</span>' + (out ? ICON.ticks : '') + '</span>';
   }
+  let renderChat = null; // the chat renderMsg is working on, so the spacer can allow for a star
   function ghostHTML(m, out) {
-    return '<span class="ghost">' + (m.edited ? 'Edited ' : '') + m.time + (out ? '<i></i>' : '') + '</span>';
+    const star = renderChat && isStarred(renderChat, m);
+    return '<span class="ghost">' + (star ? '<i></i>' : '') + (m.edited ? 'Edited ' : '') + m.time + (out ? '<i></i>' : '') + '</span>';
   }
   function captionHTML(m, out) {
     return m.text ? '<div class="caption text">' + fmt(m.text) + ghostHTML(m, out) + '</div>' : '';
@@ -405,6 +561,7 @@
       s.dataset.i = m.i;
       return s;
     }
+    renderChat = chat;
     const out = !!chat.me && m.sender === chat.me;
     const first = !prev || prev.type === 'system' || prev.sender !== m.sender || prev.day !== m.day;
     const row = el('div', 'row ' + (out ? 'out' : 'in') + (first ? ' first' : ''));
@@ -415,7 +572,7 @@
     if (chat.isGroup && !out && first) {
       html += '<div class="sender" style="color:' + chat.colors.get(m.sender) + '">' + esc(m.sender) + '</div>';
     }
-    const meta = metaHTML(m, out);
+    const meta = metaHTML(m, out, chat);
     const cap = m.text ? ' has-caption' : '';
     let type = m.type;
     if (m.file && !hasFile(chat, m.file)) type = 'missing';
@@ -444,7 +601,7 @@
       case 'audio':
         cls += ' voice' + cap;
         html += '<div class="voice-box" data-load="voice" data-file="' + esc(m.file) + '" data-i="' + m.i + '">' +
-          '<div class="v-side"><span class="avatar">' + AVATAR.person + '</span><span class="mic">' + ICON.mic + '</span>' +
+          '<div class="v-side">' + senderAvatar(chat, m.sender, '') + '<span class="mic">' + ICON.mic + '</span>' +
           '<button class="v-speed" title="Playback speed">1×</button></div>' +
           '<button class="v-play" title="Play">' + ICON.play + '</button>' +
           '<div class="v-mid"><div class="v-wave"><div class="v-bars">' + barsHTML() + '</div><div class="v-bars on">' + barsHTML() + '</div>' +
@@ -462,7 +619,7 @@
       case 'contact': {
         const name = displayName(m.file).replace(/\.vcf$/i, '');
         cls += ' contact';
-        html += '<div class="card" data-contact="' + esc(m.file) + '"><span class="avatar">' + AVATAR.person + '</span>' +
+        html += '<div class="card" data-contact="' + esc(m.file) + '">' + avatarShell('', ICON.person) +
           '<span class="info"><div class="title">' + esc(name) + '</div></span></div>' + meta +
           '<div class="contact-actions"><button>Message</button><button>Add to a group</button></div>';
         break;
@@ -502,9 +659,10 @@
         break;
       }
       default:
-        html += '<div class="text' + emojiClass(m.text) + '">' + fmt(m.text) + ghostHTML(m, out) + '</div>' + meta;
+        html += linkCardSlot(chat, m) + '<div class="text' + emojiClass(m.text) + '">' + fmt(m.text) + ghostHTML(m, out) + '</div>' + meta;
     }
 
+    if (chat.key) html += '<button class="msg-menu" title="Message options">' + ICON.down + '</button>';
     row.appendChild(el('div', cls, html));
     return row;
   }
@@ -661,6 +819,8 @@
   function goToMessage(chat, i) {
     closeLightbox();
     dom.mediaModal.hidden = true;
+    $('#insights-modal').hidden = true;
+    if (state.tab === 'memories' && window.innerWidth <= 760) setTab('chats');
     if (view.chat !== chat) openChat(chat);
     else if (window.innerWidth <= 760) closePanels();
     jumpTo(i);
@@ -680,6 +840,7 @@
     if (!chat || !node.isConnected) return;
     const kind = node.dataset.load, file = node.dataset.file;
     if (kind === 'voice') { loadVoice(chat, node, file); return; }
+    if (kind === 'preview') { loadLinkCard(node); return; }
     mediaURL(chat, file).then(url => {
       if (!node.isConnected) return;
       const media = node.firstElementChild;
@@ -874,11 +1035,12 @@
     return h + '<span class="t">' + esc((text || '').replace(/\s+/g, ' ').slice(0, 140)) + '</span>';
   }
   const lastTs = c => c.msgs[c.msgs.length - 1].ts;
-  const avatarOf = chat => AVATAR[chat.isGroup ? 'group' : 'person'];
 
   function renderList() {
     $('#groups-count').textContent = String(state.chats.filter(c => c.isGroup).length || '');
     if (state.tab === 'calls') { renderCalls(); return; }
+    if (state.tab === 'memories') { renderMemories(); return; }
+    if (globalSearchActive()) { renderGlobalSearch(); return; }
     const q = state.query.trim().toLowerCase();
     let chats = state.chats.slice().sort((a, b) => lastTs(b) - lastTs(a));
     if (q) chats = chats.filter(c => c.name.toLowerCase().includes(q));
@@ -896,7 +1058,7 @@
     for (const chat of chats) {
       const last = chat.msgs[chat.msgs.length - 1];
       const b = el('button', 'chat-item' + (chat === view.chat ? ' on' : ''),
-        '<span class="avatar lg">' + avatarOf(chat) + '</span>' +
+        avatarHTML(chat, 'lg') +
         '<span class="body"><span class="top"><span class="name">' + esc(chat.name) + '</span><span class="when">' + esc(listWhen(last, chat)) + '</span></span>' +
         '<span class="bottom"><span class="preview">' + previewHTML(chat, last) + '</span></span></span>');
       b.addEventListener('click', () => openChat(chat));
@@ -924,7 +1086,7 @@
       const kind = missed ? 'Missed' : out ? 'Outgoing' : 'Incoming';
       const extra = [m.video ? 'Video' : '', /tap to call back/i.test(m.detail) ? '' : m.detail].filter(Boolean).join(' · ');
       const b = el('button', 'chat-item',
-        '<span class="avatar lg">' + avatarOf(chat) + '</span>' +
+        avatarHTML(chat, 'lg') +
         '<span class="body"><span class="top"><span class="name">' + esc(chat.name) + '</span><span class="when">' + esc(listWhen(m, chat)) + '</span></span>' +
         '<span class="bottom"><span class="preview' + (missed ? ' missed' : '') + '">' + ICON[missed ? 'callMissed' : out ? 'callMade' : 'callReceived'] +
         '<span class="t">' + kind + (extra ? ' · ' + esc(extra) : '') + '</span></span></span></span>');
@@ -936,14 +1098,15 @@
   function setTab(tab) {
     state.tab = tab;
     closeSettings(true);
-    $('#side-title').textContent = tab === 'calls' ? 'Calls' : 'WhatsApp';
-    $('#chips').hidden = tab === 'calls';
-    $('#chat-filter').placeholder = tab === 'calls' ? 'Search name or number' : 'Search or start a new chat';
-    setRail(tab === 'calls' ? 'rail-calls' : 'rail-chats');
+    $('#side-title').textContent = { calls: 'Calls', memories: 'Memories' }[tab] || 'WhatsApp';
+    $('#chips').hidden = tab !== 'chats';
+    $('#filter-btn').hidden = tab !== 'chats';
+    $('#chat-filter').placeholder = tab === 'chats' ? 'Search or start a new chat' : 'Search name or number';
+    setRail('rail-' + tab);
     renderList();
   }
   function setRail(id) {
-    ['rail-chats', 'rail-calls', 'btn-settings'].forEach(x => $('#' + x).classList.toggle('on', x === id));
+    ['rail-chats', 'rail-calls', 'rail-memories', 'btn-settings'].forEach(x => $('#' + x).classList.toggle('on', x === id));
     $('#rail-calls').innerHTML = ICON[id === 'rail-calls' ? 'call' : 'callOutline'];
   }
 
@@ -951,7 +1114,7 @@
   function updateHeader() {
     const chat = view.chat;
     $('#convo-name').textContent = chat.name;
-    $('#convo-avatar').innerHTML = avatarOf(chat);
+    $('#convo-avatar').innerHTML = avatarHTML(chat, 'md');
     const n = chat.msgs.length;
     let sub;
     if (chat.isGroup) sub = chat.senders.map(s => (s === chat.me ? 'You' : s)).join(', ');
@@ -965,6 +1128,7 @@
     dom.preview.hidden = !previewing;
     dom.convo.hidden = !view.chat;
     dom.intro.hidden = !!view.chat || previewing;
+    applyChatTheme();
   }
 
   function openChat(chat) {
@@ -1020,22 +1184,44 @@
   }
 
   // ---------------------------------------------------------------- import / remove
-  async function importFile(file) {
+  function askMerge(twin, part) {
+    const span = msgs => monthYear(msgs[0].ts) + ' – ' + monthYear(msgs[msgs.length - 1].ts);
+    return new Promise(resolve => {
+      const box = showModal('<h3>Merge with the chat you already have?</h3>' +
+        '<p>This looks like another export of “' + esc(twin.name) + '”.</p>' +
+        '<p>Already here: ' + twin.msgs.length.toLocaleString() + ' messages, ' + span(twin.msgs) + '<br>This file: ' +
+        part.msgs.length.toLocaleString() + ' messages, ' + span(part.msgs) + '</p>' +
+        '<p>Merging shows them as one chat. Messages that are in both are kept once.</p>' +
+        '<div class="foot"><button class="ghost-btn" data-x>Keep separate</button><button class="ok-btn" data-ok>Merge</button></div>');
+      $('[data-x]', box).addEventListener('click', () => { closeModal(); resolve(false); });
+      $('[data-ok]', box).addEventListener('click', () => { closeModal(); resolve(true); });
+    });
+  }
+
+  async function importFile(file, opts) {
     if (!/\.(zip|txt)$/i.test(file.name)) { toast('"' + file.name + '" is not a WhatsApp export (.zip or .txt)'); return null; }
     toast('Importing ' + file.name + '…', true);
     try {
       const { rec, saved } = Store.addChat(file);
       saved.catch(e => { console.error(e); toast("Imported, but it couldn't be saved for next time"); });
-      const chat = await buildChat(rec);
-      const old = state.chats.find(c => c.id === chat.id);
-      if (old) forgetChat(old);
-      state.chats.push(chat);
-      applyIdentities();
+      const part = await loadPart(rec);
       hideToast();
+      state.parts = state.parts.filter(p => p.rec.id !== rec.id); // importing the same file again replaces it
+      const twin = state.chats.find(c => c.key === lc(part.baseName) && !c.parts.some(p => p.rec.id === rec.id));
+      if (twin && !settings.separate.includes(rec.id)) {
+        const merge = opts && opts.merge != null ? opts.merge : await askMerge(twin, part);
+        if (!merge) { settings.separate.push(rec.id); saveSettings(); }
+      }
+      const before = twin ? twin.msgs.length : 0;
+      state.parts.push(part);
+      rebuildChats();
+      const chat = state.chats.find(c => c.parts.includes(part));
       updateIntro();
       if (state.tab !== 'chats') setTab('chats');
       openChat(chat);
-      if (!chat.me && chat.senders.length >= 2 && !settings.me) {
+      if (twin && chat.parts.length > 1) {
+        toast('Merged into “' + chat.name + '”: ' + (chat.msgs.length - before).toLocaleString() + ' new messages');
+      } else if (!chat.me && chat.senders.length >= 2 && !settings.me) {
         toast("Couldn't tell which side is you. Pick your name in Settings.");
         openSettings('main');
       }
@@ -1046,15 +1232,12 @@
       return null;
     }
   }
-  function forgetChat(chat) {
+  function removeChat(chat) {
     if (view.chat === chat) closeChat();
     chat.urls.forEach(p => p.then(u => { if (u.startsWith('blob:')) URL.revokeObjectURL(u); }).catch(() => {}));
-    state.chats = state.chats.filter(c => c !== chat);
-  }
-  function removeChat(chat) {
-    forgetChat(chat);
-    Store.delChat(chat.id).catch(() => toast("Couldn't delete the saved copy"));
-    applyIdentities();
+    for (const part of chat.parts) Store.delChat(part.rec.id).catch(() => toast("Couldn't delete the saved copy"));
+    state.parts = state.parts.filter(p => !chat.parts.includes(p));
+    rebuildChats();
     updateIntro();
     renderList();
     if (!dom.settings.hidden) renderSettings();
@@ -1141,25 +1324,26 @@
   function openSettings(which) {
     drawer.view = which || 'main';
     dom.settings.hidden = false;
-    setRail('btn-settings');
+    if (drawer.view !== 'starred') setRail('btn-settings');
     renderSettings();
     updateMain();
   }
   // Back goes from the theme page to Settings, then closes the drawer.
   function closeSettings(all) {
     if (dom.settings.hidden) return;
-    if (drawer.view !== 'main' && all !== true) { drawer.view = 'main'; renderSettings(); updateMain(); return; }
+    if (drawer.view !== 'main' && drawer.view !== 'starred' && all !== true) { drawer.view = 'main'; renderSettings(); updateMain(); return; }
     dom.settings.hidden = true;
     drawer.view = 'main';
-    setRail(state.tab === 'calls' ? 'rail-calls' : 'rail-chats');
+    setRail('rail-' + state.tab);
     updateMain();
   }
 
   function renderSettings() {
-    $('#settings-title').textContent = { theme: 'Chat theme', help: 'How to use' }[drawer.view] || 'Settings';
+    $('#settings-title').textContent = { theme: 'Chat theme', help: 'How to use', starred: 'Starred messages' }[drawer.view] || 'Settings';
     $('#theme-reset').hidden = drawer.view !== 'theme';
     if (drawer.view === 'theme') renderThemeSettings();
     else if (drawer.view === 'help') renderHelpSettings();
+    else if (drawer.view === 'starred') renderStarred();
     else renderMainSettings();
     dom.settingsBody.scrollTop = 0;
   }
@@ -1185,7 +1369,11 @@
       tip('media', 'Media, links and docs', 'Click a chat’s name for everything shared in it, or the gallery icon in the left rail for all chats at once.') +
       tip('call', 'Calls', 'The phone icon in the left rail lists every call found in your chats. Click one to see it in context.') +
       tip('mic', 'Voice messages', 'Press play, drag the waveform to skip, and tap the speed pill for 1.5× or 2×.') +
-      tip('wallpaper', 'Themes', '<i>Settings → Chat theme</i> changes the wallpaper and bubble colour, or lets you use your own picture.') +
+      tip('wallpaper', 'Themes', '<i>Settings → Chat theme</i> changes the wallpaper and bubble colour, or lets you use your own picture. A chat can also have its own theme.') +
+      tip('starBorder', 'Star messages', 'Hover over a message and open its menu to star it. Find them again under <i>Starred messages</i> in the menus.') +
+      tip('history', 'Memories', 'The clock icon in the left rail shows what was said on this day in earlier years, or a random day.') +
+      tip('chart', 'Insights', 'The chart icon shows who talks most, the busiest days and hours, streaks and top emoji.') +
+      tip('person', 'Names and photos', 'Click a chat’s name to rename it or give it a photo. Importing a newer export of the same chat merges the two.') +
       '</div>' +
       '<div class="set-sec"><h4>Good to know</h4>' +
       '<p>This is view only: the message box and call buttons are there for looks. WhatsApp exports do not include reactions, replies-to, read receipts or profile photos, so those cannot be shown.</p>' +
@@ -1210,7 +1398,8 @@
       ? 'Imported chats are saved by the viewer’s server in its data folder (the Docker volume), so they are there from any browser that opens this address and survive restarts.'
       : 'Imported chats are saved inside this browser on this device (IndexedDB). They stay until you delete them or clear this site’s data, and are not visible from other browsers or devices.';
 
-    let h = '<div class="profile"><span class="avatar xl">' + AVATAR.person + '</span><div><div class="n">' + esc(you || 'You') + '</div>' +
+    let h = '<div class="profile"><button class="avatar-edit" data-photo="@me" title="Change your photo">' + meAvatarHTML('xl') +
+      '<span class="cam">' + ICON.camera + '</span></button><div><div class="n">' + esc(you || 'You') + '</div>' +
       '<div class="s">' + (you ? 'Your messages are shown on the right' : 'Not chosen yet') + '</div></div></div>';
 
     h += '<div class="set-sec"><h3>' + ICON.person + 'Which side is you</h3><p>Applies to every chat. Messages from this name are shown on the right.</p>' +
@@ -1225,7 +1414,12 @@
 
     h += '<div class="set-sec"><h3>' + ICON.wallpaper + 'Chats</h3>' +
       '<button class="opt" data-go="theme"><span class="lbl"><b>Chat theme</b><small>Wallpaper, bubble colour and your own background</small></span>' +
-      '<span class="chev">' + ICON.right + '</span></button></div>';
+      '<span class="chev">' + ICON.right + '</span></button>' +
+      '<button class="opt' + (settings.linkPreviews ? ' on' : '') + '" data-previews><span class="lbl"><b>Link previews</b><small>' +
+      (Store.mode === 'server' ? 'Fetches the title and picture of links from the internet. Off by default, because it contacts those sites.'
+        : 'Needs the viewer\u2019s server (Docker or node server.js).') + '</small></span><span class="switch"></span></button></div>';
+
+    h += lockSettingsHTML();
 
     h += '<div class="set-sec"><h3>' + ICON.theme + 'Appearance</h3>';
     for (const [val, label] of [['', 'System default'], ['light', 'Light'], ['dark', 'Dark']]) {
@@ -1246,15 +1440,24 @@
 
   function currentColors() {
     const dark = root.dataset.theme === 'dark';
-    const v = themeVars(settings.chat, dark), base = BASE_VARS[dark ? 'dark' : 'light'];
+    const v = themeVars(themeTarget(), dark), base = BASE_VARS[dark ? 'dark' : 'light'];
     return { bubble: v['--out-bg'] || base['--out-bg'], wall: v['--chat-bg'] || base['--chat-bg'] };
   }
 
   function renderThemeSettings() {
-    const c = settings.chat, cur = currentColors();
-    let h = '<div class="set-sec flat"><h4>Themes</h4><p>The chat colour and wallpaper will both change.</p><div class="th-grid">';
+    if (!view.chat) drawer.themeScope = 'all';
+    const scoped = drawer.themeScope === 'chat';
+    const c = themeTarget(), cur = currentColors();
+    const own = scoped && !!settings.chatThemes[view.chat.key];
+    let h = '';
+    if (view.chat) {
+      h += '<div class="seg"><button class="' + (scoped ? '' : 'on') + '" data-scope="all">All chats</button>' +
+        '<button class="' + (scoped ? 'on' : '') + '" data-scope="chat">Only ' + esc(view.chat.name) + '</button></div>';
+      if (scoped) h += '<p class="seg-note">' + (own ? 'This chat has its own theme. Use the reset arrow above to go back to the default.' : 'Pick a theme below to give this chat its own look.') + '</p>';
+    }
+    h += '<div class="set-sec flat"><h4>Themes</h4><p>The chat colour and wallpaper will both change.</p><div class="th-grid">';
     for (const t of THEMES) {
-      const on = c.id === t.id && !c.bubble && !c.wall && !c.image;
+      const on = c.id === t.id && !c.bubble && !c.wall && !c.image && (!scoped || own);
       h += '<button class="th' + (on ? ' on' : '') + '" data-th="' + t.id + '" title="' + t.id + '" style="' + esc(thumbStyle(t)) + '">' +
         '<span class="wallpaper"></span><i class="b1"></i><i class="b2"></i><span class="chk">' + ICON.check + '</span></button>';
     }
@@ -1265,17 +1468,17 @@
       '<input type="color" class="swatch round" id="c-bubble" value="' + cur.bubble + '"></label>' +
       '<label class="opt wide"><span class="lead">' + ICON.wallpaper + '</span><span class="lbl"><b>Wallpaper</b></span>' +
       '<input type="color" class="swatch" id="c-wall" value="' + (/^#[0-9a-f]{6}$/i.test(cur.wall) ? cur.wall : '#f5f1eb') + '"></label>' +
-      '<button class="opt wide' + (c.image && customWall ? ' on' : '') + '" data-wall-pick><span class="lead">' + ICON.image + '</span><span class="lbl"><b>Your own background</b>' +
+      (scoped ? '' : '<button class="opt wide' + (c.image && customWall ? ' on' : '') + '" data-wall-pick><span class="lead">' + ICON.image + '</span><span class="lbl"><b>Your own background</b>' +
       '<small>' + (customWall ? (c.image ? 'In use. Click to choose a different image' : 'Click to choose an image') : 'Use any image from your computer') + '</small></span>' +
       (customWall ? '<span class="swatch pic" style="background-image:url(&quot;' + esc(customWall) + '&quot;)"></span>' : '') + '</button>' +
       (customWall ? '<button class="opt wide" data-wall-use><span class="lead"></span><span class="lbl"><b>' + (c.image ? 'Stop using my background' : 'Use my saved background') + '</b></span></button>' +
-        '<button class="opt wide danger" data-wall-del><span class="lead">' + ICON.trash + '</span><span class="lbl"><b>Remove my background</b></span></button>' : '') +
+        '<button class="opt wide danger" data-wall-del><span class="lead">' + ICON.trash + '</span><span class="lbl"><b>Remove my background</b></span></button>' : '')) +
       '</div>';
     dom.settingsBody.innerHTML = h;
   }
 
   function setChatTheme(patch) {
-    Object.assign(settings.chat, patch);
+    Object.assign(themeTarget(true), patch);
     applyChatTheme();
     saveSettings();
   }
@@ -1294,24 +1497,27 @@
   }
 
   // ---------------------------------------------------------------- panels: search
+  const PANELS = ['#search-panel', '#info-panel', '#contact-panel'];
+  const syncPanels = () => document.body.classList.toggle('panel-open', PANELS.some(id => !$(id).hidden));
+  function showPanel(id) {
+    PANELS.forEach(x => { $(x).hidden = x !== id; });
+    syncPanels();
+  }
   function closePanels() {
     closeSearch();
-    dom.infoPanel.hidden = true;
-    document.body.classList.remove('panel-open');
+    showPanel(null);
   }
   const search = { hits: [], shown: 0, q: '' };
 
   function openSearch() {
     if (!view.chat) return;
-    dom.infoPanel.hidden = true;
-    dom.searchPanel.hidden = false;
-    document.body.classList.add('panel-open');
+    showPanel('#search-panel');
     runSearch();
     dom.searchInput.focus();
   }
   function closeSearch() {
     dom.searchPanel.hidden = true;
-    if (dom.infoPanel.hidden) document.body.classList.remove('panel-open');
+    syncPanels();
     dom.searchInput.value = '';
   }
   function runSearch() {
@@ -1356,193 +1562,13 @@
     dom.results.appendChild(frag);
   }
 
-  // ---------------------------------------------------------------- media, docs and links
-  const gal = { scope: 'chat', tab: 'media', sentBy: 'all', sort: 'newest', items: [], shown: 0, lastKey: null, cur: null };
-  let galIO = null;
-  const galHost = () => (gal.scope === 'all' ? dom.mediaModal : dom.infoPanel);
-  const TAB_WORD = { media: 'Media', docs: 'Docs', links: 'Links' };
-
-  function openGallery(scope, tab) {
-    if (scope === 'chat' && !view.chat) scope = 'all';
-    gal.scope = scope;
-    if (tab) gal.tab = tab;
-    gal.sentBy = 'all'; gal.sort = 'newest';
-    if (scope === 'all') dom.mediaModal.hidden = false;
-    else {
-      dom.searchPanel.hidden = true;
-      dom.infoPanel.hidden = false;
-      document.body.classList.add('panel-open');
-    }
-    renderGallery();
-  }
-  function closeGallery(host) {
-    if (host === dom.mediaModal) {
-      dom.mediaModal.hidden = true;
-      if (!dom.infoPanel.hidden && view.chat) { gal.scope = 'chat'; renderGallery(); }
-    } else {
-      dom.infoPanel.hidden = true;
-      if (dom.searchPanel.hidden) document.body.classList.remove('panel-open');
-    }
-  }
-
-  function galleryItems() {
-    const chats = gal.scope === 'chat' ? [view.chat] : state.chats;
-    const items = [];
-    for (const chat of chats) {
-      const idx = gal.tab === 'media' ? chat.visual : gal.tab === 'docs' ? chat.docs : chat.links;
-      for (const i of idx) {
-        const m = chat.msgs[i];
-        const out = !!chat.me && m.sender === chat.me;
-        if (gal.sentBy === 'you' && !out) continue;
-        if (gal.sentBy === 'others' && out) continue;
-        items.push({ chat, m, size: gal.tab === 'links' ? 0 : fileSize(chat, m.file) });
-      }
-    }
-    if (gal.sort === 'oldest') items.sort((a, b) => a.m.ts - b.m.ts);
-    else if (gal.sort === 'largest' && gal.tab !== 'links') items.sort((a, b) => b.size - a.size);
-    else items.sort((a, b) => b.m.ts - a.m.ts);
-    return items;
-  }
-
-  function renderGallery() {
-    const host = galHost(), body = $('.g-body', host);
-    host.querySelectorAll('.g-tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === gal.tab));
-    if (gal.scope === 'all') {
-      $('.media-title .name', host).textContent = TAB_WORD[gal.tab];
-      $('.media-title .sub', host).textContent = TAB_WORD[gal.tab] + ' from all chats';
-    }
-    gal.items = galleryItems();
-    gal.shown = 0; gal.lastKey = null; gal.cur = null;
-    if (galIO) galIO.disconnect();
-    galIO = new IntersectionObserver(entries => {
-      for (const e of entries) if (e.isIntersecting) { galIO.unobserve(e.target); loadTile(e.target); }
-    }, { root: body, rootMargin: '600px 0px' });
-    body.textContent = '';
-    body.scrollTop = 0;
-    if (!gal.items.length) {
-      const word = { media: 'media', docs: 'documents', links: 'links' }[gal.tab];
-      const filtered = gal.sentBy !== 'all';
-      const empty = el('div', 'g-empty', '<div class="t">No ' + word + '</div><div class="s">' +
-        (filtered ? 'Nothing matches this filter.' : gal.scope === 'chat' ? TAB_WORD[gal.tab] + ' shared in this chat will appear here.' : TAB_WORD[gal.tab] + ' from your imported chats will appear here.') + '</div>' +
-        (gal.scope === 'chat' ? '<button data-all>' + ICON.media + 'View ' + lc(TAB_WORD[gal.tab]) + ' from all chats</button>' : ''));
-      body.appendChild(empty);
-      return;
-    }
-    moreGallery();
-    while (gal.shown < gal.items.length && body.scrollHeight <= body.clientHeight + 300) moreGallery();
-  }
-
-  function moreGallery() {
-    const body = $('.g-body', galHost());
-    const end = Math.min(gal.items.length, gal.shown + (gal.tab === 'media' ? 72 : 50));
-    const grouped = !(gal.sort === 'largest' && gal.tab !== 'links');
-    const boxClass = gal.tab === 'media' ? 'g-grid' : 'g-list';
-    for (let k = gal.shown; k < end; k++) {
-      const it = gal.items[k];
-      if (grouped) {
-        const b = bucketOf(it.m.ts);
-        if (b.key !== gal.lastKey) {
-          gal.lastKey = b.key;
-          body.appendChild(el('div', 'g-sec', '<div class="t">' + esc(b.title) + '</div><div class="s">' + esc(b.sub) + '</div>'));
-          gal.cur = body.appendChild(el('div', boxClass));
-        }
-      } else if (!gal.cur) {
-        gal.cur = body.appendChild(el('div', boxClass + ' flat'));
-      }
-      gal.cur.appendChild(galleryNode(it, k));
-    }
-    gal.shown = end;
-  }
-
-  function galleryNode(it, k) {
-    const { chat, m } = it;
-    const all = gal.scope === 'all';
-    const who = m.sender === chat.me ? 'You' : m.sender;
-    let node;
-    if (gal.tab === 'media') {
-      node = el('button', 'g-tile',
-        (m.type === 'image' ? '<img alt="" draggable="false">' : '<video muted playsinline preload="metadata"></video><span class="vid">' + ICON.videoFill + '<span></span></span>') +
-        (all ? '<span class="who">' + esc(chat.name) + '</span>' : ''));
-      node.title = who + ' · ' + numericDate(m.ts, chat) + ' ' + m.time;
-      galIO.observe(node);
-    } else if (gal.tab === 'docs') {
-      const name = m.title || displayName(m.file);
-      node = el('button', 'g-doc', '<span class="ico">' + ICON.doc + '</span><span class="info"><div class="n">' + esc(name) + '</div>' +
-        '<div class="m">' + esc([extOf(m.file).toUpperCase(), fmtSize(it.size), all ? chat.name : who, numericDate(m.ts, chat)].join(' · ')) + '</div></span>');
-    } else {
-      const urls = chat.linkMap.get(m.i) || [];
-      let host = urls[0] || '';
-      try { host = new URL(hrefOf(urls[0])).hostname.replace(/^www\./, ''); } catch (e) { /* keep raw */ }
-      const rest = m.text.replace(new RegExp(URL_RE.source, 'gi'), ' ').replace(/\s+/g, ' ').trim();
-      node = el('div', 'g-link', '<span class="ico">' + ICON.link + '</span><span class="info"><div class="n">' + esc(host) + '</div>' +
-        urls.slice(0, 3).map(u => '<a href="' + esc(hrefOf(u)) + '" target="_blank" rel="noopener noreferrer">' + esc(u) + '</a>').join('') +
-        (rest ? '<div class="x">' + esc(rest.slice(0, 200)) + '</div>' : '') +
-        '<div class="m">' + esc([all ? chat.name : who, numericDate(m.ts, chat), m.time].join(' · ')) + '</div></span>' +
-        '<button class="icon-btn go" title="Go to message">' + ICON.gotomsg + '</button>');
-    }
-    node.dataset.k = k;
-    return node;
-  }
-
-  function loadTile(node) {
-    const it = gal.items[+node.dataset.k];
-    if (!it) return;
-    mediaURL(it.chat, it.m.file).then(url => {
-      const media = node.firstElementChild;
-      if (it.m.type === 'image') {
-        media.onload = () => node.classList.add('loaded');
-        media.src = url;
-      } else {
-        media.onloadedmetadata = () => { $('.vid span', node).textContent = fmtDur(media.duration); };
-        media.onloadeddata = () => node.classList.add('loaded');
-        media.src = url + '#t=0.1';
-      }
-    }).catch(() => node.classList.add('loaded'));
-  }
-
-  function bindGallery(host) {
-    const body = $('.g-body', host);
-    $('.g-tabs', host).addEventListener('click', e => {
-      const b = e.target.closest('button');
-      if (b) { gal.tab = b.dataset.tab; renderGallery(); }
-    });
-    $('.g-close', host).addEventListener('click', () => closeGallery(host));
-    $('.g-sort', host).addEventListener('click', e => {
-      e.stopPropagation();
-      const pick = (key, val) => () => { gal[key] = val; renderGallery(); };
-      openMenu(e.currentTarget, [
-        { heading: 'Sent by' },
-        { label: 'All', radio: true, on: gal.sentBy === 'all', run: pick('sentBy', 'all') },
-        { label: 'You', radio: true, on: gal.sentBy === 'you', run: pick('sentBy', 'you') },
-        { label: 'Others', radio: true, on: gal.sentBy === 'others', run: pick('sentBy', 'others') },
-        '-',
-        { heading: 'Sort by' },
-        { label: 'Newest', radio: true, on: gal.sort === 'newest', run: pick('sort', 'newest') },
-        { label: 'Oldest', radio: true, on: gal.sort === 'oldest', run: pick('sort', 'oldest') },
-        { label: 'Largest', radio: true, on: gal.sort === 'largest', run: pick('sort', 'largest') },
-      ]);
-    });
-    body.addEventListener('scroll', () => {
-      if (host === galHost() && gal.shown < gal.items.length && body.scrollHeight - body.scrollTop - body.clientHeight < 900) moreGallery();
-    }, { passive: true });
-    body.addEventListener('click', e => {
-      if (e.target.closest('[data-all]')) { openGallery('all', gal.tab); return; }
-      const node = e.target.closest('[data-k]');
-      if (!node) return;
-      const it = gal.items[+node.dataset.k];
-      if (!it) return;
-      if (gal.tab === 'media') showLightbox(gal.items, +node.dataset.k, gal.scope === 'all');
-      else if (gal.tab === 'docs') openDoc(it.chat, it.m.file);
-      else if (e.target.closest('.go')) goToMessage(it.chat, it.m.i);
-    });
-  }
-
   // ---------------------------------------------------------------- lightbox
   const lb = { items: [], pos: -1, showChat: false };
   async function showLightbox(items, pos, showChat) {
     lb.items = items; lb.pos = pos; lb.showChat = !!showChat;
     const { chat, m } = items[pos];
     const out = !!chat.me && m.sender === chat.me;
+    $('#lb-avatar').innerHTML = senderAvatar(chat, m.sender, 'md');
     $('#lb-name').textContent = out ? 'You' : m.sender;
     $('#lb-sub').textContent = longDate(m.ts) + ' at ' + m.time + (lb.showChat ? ' · ' + chat.name : '');
     $('#lb-caption').textContent = m.text || '';
@@ -1596,7 +1622,7 @@
     $('#tile-import').addEventListener('click', pick);
     $('#tile-media').addEventListener('click', () => openGallery('all', 'media'));
     $('#tile-settings').addEventListener('click', () => openSettings('main'));
-    $('#tile-theme').addEventListener('click', toggleAppTheme);
+    $('#tile-insights').addEventListener('click', () => openInsights());
     dom.fileInput.addEventListener('change', () => {
       const files = [...dom.fileInput.files];
       dom.fileInput.value = '';
@@ -1605,12 +1631,18 @@
 
     $('#rail-chats').addEventListener('click', () => setTab('chats'));
     $('#rail-calls').addEventListener('click', () => setTab('calls'));
+    $('#rail-memories').addEventListener('click', () => setTab('memories'));
+    $('#rail-insights').addEventListener('click', () => openInsights());
     $('#btn-media').addEventListener('click', () => openGallery('all', 'media'));
     $('#btn-settings').addEventListener('click', () => (dom.settings.hidden ? openSettings('main') : closeSettings(true)));
     $('#btn-profile').addEventListener('click', () => openSettings('main'));
     $('#settings-close').addEventListener('click', () => closeSettings());
     $('#theme-reset').addEventListener('click', () => {
-      setChatTheme({ id: 'default', bubble: '', wall: '', doodles: true, image: false });
+      if (drawer.themeScope === 'chat' && view.chat) {
+        delete settings.chatThemes[view.chat.key];
+        applyChatTheme();
+        saveSettings();
+      } else setChatTheme({ id: 'default', bubble: '', wall: '', doodles: true, image: false });
       renderSettings();
     });
 
@@ -1618,8 +1650,12 @@
       e.stopPropagation();
       openMenu(e.currentTarget, [
         { label: 'Import chat', run: pick },
-        state.tab === 'calls' ? { label: 'Chats', run: () => setTab('chats') } : { label: 'Calls', run: () => setTab('calls') },
+        { label: 'Starred messages', run: () => openStarred(null) },
         { label: 'Media, links and docs', run: () => openGallery('all', 'media') },
+        state.tab === 'calls' ? { label: 'Chats', run: () => setTab('chats') } : { label: 'Calls', run: () => setTab('calls') },
+        { label: 'Memories', run: () => setTab('memories') },
+        { label: 'Insights', run: () => openInsights() },
+        '-',
         { label: 'Settings', run: () => openSettings('main') },
       ]);
     });
@@ -1627,8 +1663,12 @@
       e.stopPropagation();
       const chat = view.chat;
       openMenu(e.currentTarget, [
-        { label: 'Media, links and docs', run: () => openGallery('chat', 'media') },
+        { label: chat.isGroup ? 'Group info' : 'Contact info', run: openInfo },
         { label: 'Search messages', run: openSearch },
+        { label: 'Media, links and docs', run: () => openGallery('chat', 'media') },
+        { label: 'Starred messages', run: () => openStarred(chat) },
+        { label: 'Chat insights', run: () => openInsights(chat) },
+        { label: 'Chat theme', run: () => { drawer.themeScope = 'chat'; openSettings('theme'); } },
         { label: 'Close chat', run: closeChat },
         '-',
         { label: 'Delete chat', danger: true, run: () => confirmBox('Delete this chat?', '“' + chat.name + '” will be removed from this viewer. Your exported file is not touched.', 'Delete chat', () => removeChat(chat)) },
@@ -1649,12 +1689,22 @@
     dom.settingsBody.addEventListener('click', e => {
       const t = e.target;
       let hit;
-      if ((hit = t.closest('[data-me]'))) {
+      if (extrasSettingsClick(t)) return;
+      if ((hit = t.closest('[data-scope]'))) {
+        drawer.themeScope = hit.dataset.scope;
+        renderSettings();
+      } else if (t.closest('[data-previews]')) {
+        if (Store.mode !== 'server') { toast('Link previews need the viewer\u2019s server'); return; }
+        settings.linkPreviews = !settings.linkPreviews;
+        saveSettings();
+        renderSettings();
+        refreshChat();
+      } else if ((hit = t.closest('[data-me]'))) {
         settings.me = hit.dataset.me;
         saveSettings();
         applyIdentities();
         refreshChat();
-        renderList();
+        refreshAvatars();
         renderSettings();
       } else if ((hit = t.closest('[data-app-theme]'))) {
         settings.theme = hit.dataset.appTheme;
@@ -1705,7 +1755,7 @@
     });
 
     $('#btn-back').addEventListener('click', closeChat);
-    $('#convo-id').addEventListener('click', () => (dom.infoPanel.hidden ? openGallery('chat', 'media') : closeGallery(dom.infoPanel)));
+    $('#convo-id').addEventListener('click', () => ($('#contact-panel').hidden ? openInfo() : closePanels()));
     $('#btn-search').addEventListener('click', () => (dom.searchPanel.hidden ? openSearch() : closeSearch()));
     $('#search-close').addEventListener('click', closeSearch);
     let searchTimer = 0;
@@ -1787,10 +1837,12 @@
         if (menuEl) closeMenu();
         else if (!dom.modal.hidden) closeModal();
         else if (!dom.lightbox.hidden) closeLightbox();
+        else if (!$('#insights-modal').hidden) $('#insights-modal').hidden = true;
         else if (!dom.mediaModal.hidden) closeGallery(dom.mediaModal);
         else if (!dom.settings.hidden) closeSettings();
         else if (!dom.searchPanel.hidden) closeSearch();
         else if (!dom.infoPanel.hidden) closeGallery(dom.infoPanel);
+        else if (!$('#contact-panel').hidden) closePanels();
       } else if (!dom.lightbox.hidden && e.key === 'ArrowLeft') stepLightbox(-1);
       else if (!dom.lightbox.hidden && e.key === 'ArrowRight') stepLightbox(1);
     });
@@ -1809,6 +1861,7 @@
     });
 
     matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { if (!settings.theme) applyAppTheme(); });
+    bindExtras();
   }
 
   // ---------------------------------------------------------------- boot
@@ -1820,13 +1873,18 @@
     renderList();
 
     await Store.init();
+    if (Store.locked && !Store.authed) await lockScreen();
     try {
       const saved = await Store.loadSettings();
-      if (typeof saved.me === 'string') settings.me = saved.me;
-      if (typeof saved.theme === 'string') settings.theme = saved.theme;
-      else if (LS.get('wa-theme')) settings.theme = LS.get('wa-theme');
-      if (saved.chat && typeof saved.chat === 'object') Object.assign(settings.chat, saved.chat);
+      for (const k of ['me', 'theme']) if (typeof saved[k] === 'string') settings[k] = saved[k];
+      if (typeof saved.theme !== 'string' && LS.get('wa-theme')) settings.theme = LS.get('wa-theme');
+      for (const k of ['chat', 'chatThemes', 'starred', 'contacts']) {
+        if (saved[k] && typeof saved[k] === 'object' && !Array.isArray(saved[k])) Object.assign(settings[k], saved[k]);
+      }
+      if (Array.isArray(saved.separate)) settings.separate = saved.separate;
+      settings.linkPreviews = !!saved.linkPreviews;
     } catch (e) { console.warn('Settings unavailable', e); }
+    try { await Store.loadFiles(); } catch (e) { /* photos are optional */ }
     try { customWall = await Store.getWallpaper(); } catch (e) { customWall = null; }
     applyAppTheme();
 
@@ -1834,18 +1892,16 @@
       const recs = await Store.listChats();
       recs.sort((a, b) => a.addedAt - b.addedAt);
       for (const rec of recs) {
-        try { state.chats.push(await buildChat(rec)); }
+        try { state.parts.push(await loadPart(rec)); }
         catch (e) { console.warn('Skipping saved chat', rec.fileName, e); }
       }
     } catch (e) { console.warn('Saved chats unavailable', e); }
-    applyIdentities();
+    rebuildChats();
+    refreshAvatars();
     updateIntro();
-    renderList();
     if (state.chats.length && window.innerWidth > 760) {
       openChat(state.chats.slice().sort((a, b) => lastTs(b) - lastTs(a))[0]);
     }
   }
 
-  window.WAViewer = { importFile, state, view, settings, jumpTo, Store };
-  boot();
-})();
+  window.WAViewer = { importFile, state, view, settings, jumpTo, Store, boot };

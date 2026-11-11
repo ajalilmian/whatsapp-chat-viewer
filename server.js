@@ -8,12 +8,18 @@ const http = require('http');
 const fs = require('fs');
 const fsp = fs.promises;
 const path = require('path');
+const crypto = require('crypto');
+const net = require('net');
+const dns = require('dns').promises;
 
 const PORT = Number(process.env.PORT) || 5178;
 const HOST = process.env.HOST || '127.0.0.1';
 const ROOT = __dirname;
 const DATA = path.resolve(process.env.DATA_DIR || path.join(ROOT, 'data'));
 const CHATS = path.join(DATA, 'chats');
+const FILES = path.join(DATA, 'files');
+const PREVIEWS = path.join(DATA, 'previews');
+const LOCK_FILE = path.join(DATA, 'lock.json');
 
 // Only these are ever served as static files; nothing else in the folder is reachable.
 const STATIC_DIRS = ['css', 'js', 'assets'];
@@ -98,11 +104,193 @@ async function listChats() {
   return out.sort((a, b) => a.addedAt - b.addedAt);
 }
 
+// ---------------------------------------------------------------- screen lock
+// When a password is set, every API call except health and unlock needs a session cookie.
+let lock = null;
+const sessions = new Set();
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const scrypt = (password, salt) => new Promise((res, rej) =>
+  crypto.scrypt(String(password), Buffer.from(salt, 'hex'), 32, (err, key) => (err ? rej(err) : res(key.toString('hex')))));
+const sessionOf = req => { const m = /(?:^|;\s*)wa_session=([a-f0-9]{48})/.exec(req.headers.cookie || ''); return m ? m[1] : null; };
+const authed = req => !lock || sessions.has(sessionOf(req));
+function startSession(res) {
+  const token = crypto.randomBytes(24).toString('hex');
+  sessions.add(token);
+  res.setHeader('Set-Cookie', 'wa_session=' + token + '; HttpOnly; SameSite=Strict; Path=/');
+}
+async function jsonBody(req) {
+  try { return JSON.parse((await readBody(req, 1 << 16)).toString('utf8') || '{}') || {}; } catch (e) { return {}; }
+}
+
+// ---------------------------------------------------------------- link previews
+// Fetches a linked page's title, description and picture. Only public http(s) addresses are
+// contacted, so the endpoint cannot be used to reach machines on the local network.
+function isPrivateIP(ip) {
+  if (net.isIPv4(ip)) {
+    const [a, b] = ip.split('.').map(Number);
+    return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127) || a >= 224;
+  }
+  const l = ip.toLowerCase();
+  if (l.startsWith('::ffff:')) return isPrivateIP(l.slice(7));
+  return l === '::' || l === '::1' || /^f[cd]/.test(l) || /^fe[89ab]/.test(l);
+}
+async function safeFetch(link, accept, hops) {
+  const u = new URL(link);
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error('Unsupported link');
+  const addrs = await dns.lookup(u.hostname, { all: true });
+  if (!addrs.length || addrs.some(a => isPrivateIP(a.address))) throw new Error('Address not allowed');
+  const r = await fetch(u, {
+    redirect: 'manual', signal: AbortSignal.timeout(8000),
+    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LinkPreview/1.0)', Accept: accept, 'Accept-Language': 'en' },
+  });
+  const next = r.headers.get('location');
+  if (r.status >= 300 && r.status < 400 && next && (hops || 0) < 4) {
+    try { await r.body.cancel(); } catch (e) { /* ignore */ }
+    return safeFetch(new URL(next, u).href, accept, (hops || 0) + 1);
+  }
+  return r;
+}
+async function readLimited(r, max) {
+  const reader = r.body.getReader();
+  const chunks = [];
+  let size = 0;
+  while (size < max) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(Buffer.from(value));
+    size += value.length;
+  }
+  try { await reader.cancel(); } catch (e) { /* ignore */ }
+  return Buffer.concat(chunks).subarray(0, max);
+}
+const ENT = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
+const decodeEntities = t => t.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (m, e) => {
+  if (e[0] !== '#') return ENT[e.toLowerCase()] || m;
+  const code = e[1].toLowerCase() === 'x' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
+  try { return String.fromCodePoint(code); } catch (err) { return m; }
+});
+const clean = (t, max) => decodeEntities(String(t || '')).replace(/\s+/g, ' ').trim().slice(0, max);
+const previewKey = link => crypto.createHash('sha1').update(link).digest('hex');
+const previewMisses = new Map();
+
+async function buildPreview(link) {
+  const key = previewKey(link);
+  const file = path.join(PREVIEWS, key + '.json');
+  try { return JSON.parse(await fsp.readFile(file, 'utf8')); } catch (e) { /* not cached yet */ }
+  if (previewMisses.has(key)) return {};
+  try {
+    const r = await safeFetch(link, 'text/html,application/xhtml+xml');
+    if (!r.ok || !/html/i.test(r.headers.get('content-type') || '')) throw new Error('Not a web page');
+    const html = (await readLimited(r, 400000)).toString('utf8');
+    const meta = {};
+    for (const tag of html.match(/<meta\b[^>]*>/gi) || []) {
+      const name = /\b(?:property|name)\s*=\s*["']([^"']+)["']/i.exec(tag);
+      const content = /\bcontent\s*=\s*(?:"([^"]*)"|'([^']*)')/i.exec(tag);
+      if (name && content && !(name[1].toLowerCase() in meta)) meta[name[1].toLowerCase()] = content[1] != null ? content[1] : content[2];
+    }
+    const title = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html);
+    const info = {
+      title: clean(meta['og:title'] || meta['twitter:title'] || (title && title[1]), 200),
+      description: clean(meta['og:description'] || meta['twitter:description'] || meta.description, 300),
+      site: clean(meta['og:site_name'], 80) || new URL(link).hostname.replace(/^www\./, ''),
+      image: false,
+    };
+    if (!info.title) throw new Error('No title');
+    const picture = meta['og:image'] || meta['og:image:url'] || meta['twitter:image'];
+    if (picture) {
+      try {
+        const ir = await safeFetch(new URL(decodeEntities(picture), link).href, 'image/*');
+        const type = (ir.headers.get('content-type') || '').split(';')[0].trim();
+        if (ir.ok && /^image\/(jpeg|png|gif|webp|avif)$/.test(type)) {
+          await fsp.writeFile(path.join(PREVIEWS, key + '.img'), await readLimited(ir, 3 << 20));
+          info.image = true;
+          info.imageType = type;
+        }
+      } catch (e) { /* preview without a picture */ }
+    }
+    await fsp.writeFile(file, JSON.stringify(info));
+    return info;
+  } catch (e) {
+    previewMisses.set(key, true);
+    return {};
+  }
+}
+
 async function api(req, res, url) {
   const parts = url.pathname.split('/').filter(Boolean).slice(1); // after "api"
   const method = req.method;
 
-  if (parts[0] === 'health') return json(res, 200, { ok: true, app: 'wa-chat-viewer' });
+  if (parts[0] === 'health') return json(res, 200, { ok: true, app: 'wa-chat-viewer', locked: !!lock, authed: authed(req) });
+
+  if (parts[0] === 'unlock' && method === 'POST') {
+    const { password } = await jsonBody(req);
+    if (!lock) return json(res, 200, { ok: true });
+    const given = Buffer.from(await scrypt(password || '', lock.salt), 'hex');
+    if (crypto.timingSafeEqual(given, Buffer.from(lock.hash, 'hex'))) { startSession(res); return json(res, 200, { ok: true }); }
+    await sleep(700); // slows down guessing
+    return json(res, 401, { error: 'Wrong password' });
+  }
+  if (!authed(req)) return json(res, 401, { error: 'Locked' });
+
+  if (parts[0] === 'lock' && parts.length === 1) {
+    if (method === 'POST') {
+      const { password } = await jsonBody(req);
+      if (!password || String(password).length > 200) return json(res, 400, { error: 'Bad password' });
+      const salt = crypto.randomBytes(16).toString('hex');
+      lock = { salt, hash: await scrypt(password, salt) };
+      await fsp.writeFile(LOCK_FILE, JSON.stringify(lock));
+      sessions.clear();
+      startSession(res);
+      return json(res, 200, { ok: true });
+    }
+    if (method === 'DELETE') {
+      lock = null;
+      sessions.clear();
+      await fsp.rm(LOCK_FILE, { force: true });
+      return json(res, 200, { ok: true });
+    }
+  }
+  if (parts[0] === 'logout' && method === 'POST') {
+    sessions.delete(sessionOf(req));
+    res.setHeader('Set-Cookie', 'wa_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0');
+    return json(res, 200, { ok: true });
+  }
+
+  if (parts[0] === 'files' && parts.length === 2) {
+    const name = parts[1];
+    if (!ID.test(name)) return json(res, 400, { error: 'Bad file name' });
+    const file = path.join(FILES, name + '.bin'), typeFile = path.join(FILES, name + '.type');
+    if (method === 'GET' || method === 'HEAD') {
+      let st, type = '';
+      try { st = await fsp.stat(file); } catch (e) { return json(res, 404, { error: 'Not found' }); }
+      try { type = (await fsp.readFile(typeFile, 'utf8')).trim(); } catch (e) { /* default */ }
+      return serveBytes(req, res, file, 0, st.size, /^image\/(jpeg|png|gif|webp|avif|bmp)$/.test(type) ? type : 'application/octet-stream', 'private, max-age=31536000');
+    }
+    if (method === 'PUT') {
+      await receive(req, file);
+      await fsp.writeFile(typeFile, String(req.headers['content-type'] || '').split(';')[0].trim());
+      return json(res, 200, { ok: true });
+    }
+    if (method === 'DELETE') {
+      await fsp.rm(file, { force: true });
+      await fsp.rm(typeFile, { force: true });
+      return json(res, 200, { ok: true });
+    }
+  }
+
+  if (parts[0] === 'preview' && method === 'GET') {
+    const link = url.searchParams.get('url') || '';
+    if (!/^https?:\/\//i.test(link) || link.length > 2000) return json(res, 400, { error: 'Bad link' });
+    const info = await buildPreview(link);
+    if (parts[1] === 'image') {
+      const file = path.join(PREVIEWS, previewKey(link) + '.img');
+      let st;
+      try { st = await fsp.stat(file); } catch (e) { return json(res, 404, { error: 'No picture' }); }
+      return serveBytes(req, res, file, 0, st.size, info.imageType || 'application/octet-stream', 'private, max-age=604800');
+    }
+    return json(res, 200, { title: info.title || '', description: info.description || '', site: info.site || '', image: !!info.image });
+  }
 
   if (parts[0] === 'chats' && parts.length === 1 && method === 'GET') return json(res, 200, await listChats());
 
@@ -203,7 +391,8 @@ async function staticFile(req, res, url) {
   }
 }
 
-fs.mkdirSync(CHATS, { recursive: true });
+for (const dir of [CHATS, FILES, PREVIEWS]) fs.mkdirSync(dir, { recursive: true });
+try { lock = JSON.parse(fs.readFileSync(LOCK_FILE, 'utf8')); } catch (e) { lock = null; }
 
 http.createServer((req, res) => {
   const url = new URL(req.url, 'http://localhost');

@@ -35,24 +35,53 @@
   }
 
   const api = (path, opts) => fetch('api/' + path, opts).then(r => {
-    if (!r.ok) throw new Error('Server error ' + r.status);
+    if (!r.ok) { const e = new Error('Server error ' + r.status); e.status = r.status; throw e; }
     return r;
   });
+  const post = (path, body, method) => api(path, { method: method || 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
   const remoteSource = (id, size) => Zip.fromURL('api/chats/' + encodeURIComponent(id) + '/file', size);
 
+  // Browser-mode screen lock: a salted PBKDF2 hash kept in localStorage.
+  const hex = buf => [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
+  async function derive(password, saltHex) {
+    const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveBits']);
+    const salt = new Uint8Array(saltHex.match(/../g).map(h => parseInt(h, 16)));
+    return hex(await crypto.subtle.deriveBits({ name: 'PBKDF2', salt, iterations: 150000, hash: 'SHA-256' }, key, 256));
+  }
+  const localLock = () => { try { return JSON.parse(LS.get('wa-lock') || 'null'); } catch (e) { return null; } };
+  const session = {
+    get() { try { return sessionStorage.getItem('wa-unlocked'); } catch (e) { return null; } },
+    set(on) { try { if (on) sessionStorage.setItem('wa-unlocked', '1'); else sessionStorage.removeItem('wa-unlocked'); } catch (e) { /* ignore */ } },
+  };
+
   let wallURL = null;
+  const fileURLs = new Map(); // browser mode: name -> object URL
 
   const Store = {
     mode: 'browser',
+    locked: false,   // a password is set
+    authed: true,    // this session has entered it
+    canLock: true,
 
     async init() {
       try {
         const r = await fetch('api/health', { cache: 'no-store' });
-        if (r.ok && (await r.json()).app === 'wa-chat-viewer') this.mode = 'server';
+        const info = r.ok ? await r.json() : null;
+        if (info && info.app === 'wa-chat-viewer') {
+          this.mode = 'server';
+          this.locked = !!info.locked;
+          this.authed = !info.locked || !!info.authed;
+        }
       } catch (e) { /* static hosting: stay in browser mode */ }
+      if (this.mode === 'browser') {
+        this.canLock = !!(global.crypto && crypto.subtle);
+        this.locked = !!localLock();
+        this.authed = !this.locked || !!session.get();
+      }
       return this.mode;
     },
 
+    // ---- chats
     async listChats() {
       if (this.mode === 'server') {
         const list = await (await api('chats', { cache: 'no-store' })).json();
@@ -84,6 +113,7 @@
       return tx('chats', 'readwrite', s => s.delete(id));
     },
 
+    // ---- settings
     async loadSettings() {
       let local = null;
       try { local = JSON.parse(LS.get('wa-settings') || 'null'); } catch (e) { /* ignore */ }
@@ -97,15 +127,38 @@
     },
 
     saveSettings(obj) {
-      LS.set('wa-settings', JSON.stringify(obj));
       LS.set('wa-theme', obj.theme || null);
-      if (this.mode === 'server') {
-        return api('settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(obj) });
-      }
+      if (this.mode === 'server') return post('settings', obj, 'PUT');
+      LS.set('wa-settings', JSON.stringify(obj));
       return Promise.resolve();
     },
 
-    // Custom chat background image. Resolves to a URL, or null when none is saved.
+    // ---- small files (contact photos)
+    async loadFiles() {
+      if (this.mode === 'server') return;
+      const [keys, vals] = await Promise.all([tx('kv', 'readonly', s => s.getAllKeys()), tx('kv', 'readonly', s => s.getAll())]);
+      keys.forEach((k, i) => { if (String(k).startsWith('file:')) fileURLs.set(String(k).slice(5), URL.createObjectURL(vals[i])); });
+    },
+    fileURL(name, version) {
+      if (this.mode === 'server') return 'api/files/' + encodeURIComponent(name) + '?v=' + encodeURIComponent(version || 0);
+      return fileURLs.get(name) || null;
+    },
+    async putFile(name, blob) {
+      if (this.mode === 'server') {
+        await api('files/' + encodeURIComponent(name), { method: 'PUT', headers: { 'Content-Type': blob.type || 'application/octet-stream' }, body: blob });
+        return;
+      }
+      await tx('kv', 'readwrite', s => s.put(blob, 'file:' + name));
+      if (fileURLs.has(name)) URL.revokeObjectURL(fileURLs.get(name));
+      fileURLs.set(name, URL.createObjectURL(blob));
+    },
+    async delFile(name) {
+      if (this.mode === 'server') { await api('files/' + encodeURIComponent(name), { method: 'DELETE' }); return; }
+      await tx('kv', 'readwrite', s => s.delete('file:' + name));
+      if (fileURLs.has(name)) { URL.revokeObjectURL(fileURLs.get(name)); fileURLs.delete(name); }
+    },
+
+    // ---- custom chat background. Resolves to a URL, or null when none is saved.
     async getWallpaper() {
       if (this.mode === 'server') {
         const r = await fetch('api/wallpaper', { method: 'HEAD', cache: 'no-store' });
@@ -128,6 +181,50 @@
         await tx('kv', 'readwrite', s => s.delete('wallpaper'));
       }
       return this.getWallpaper();
+    },
+
+    // ---- screen lock. In server mode the server refuses to hand out chats until unlocked;
+    // in browser mode it only hides them in this browser.
+    async unlock(password) {
+      if (this.mode === 'server') {
+        try { await post('unlock', { password }); } catch (e) { return false; }
+      } else {
+        const lock = localLock();
+        if (lock && (await derive(password, lock.salt)) !== lock.hash) return false;
+        session.set(true);
+      }
+      this.authed = true;
+      return true;
+    },
+    async setLock(password) {
+      if (this.mode === 'server') await post('lock', { password });
+      else {
+        const salt = hex(crypto.getRandomValues(new Uint8Array(16)));
+        LS.set('wa-lock', JSON.stringify({ salt, hash: await derive(password, salt) }));
+        session.set(true);
+      }
+      this.locked = true; this.authed = true;
+    },
+    async removeLock() {
+      if (this.mode === 'server') await api('lock', { method: 'DELETE' });
+      else { LS.set('wa-lock', null); session.set(false); }
+      this.locked = false; this.authed = true;
+    },
+    async logout() {
+      if (this.mode === 'server') await post('logout').catch(() => {});
+      else session.set(false);
+      this.authed = false;
+    },
+
+    // ---- link previews (server mode only): { title, description, site, image } or null
+    async preview(url) {
+      if (this.mode !== 'server') return null;
+      try {
+        const info = await (await api('preview?url=' + encodeURIComponent(url))).json();
+        if (!info || !info.title) return null;
+        if (info.image) info.image = 'api/preview/image?url=' + encodeURIComponent(url);
+        return info;
+      } catch (e) { return null; }
     },
   };
 

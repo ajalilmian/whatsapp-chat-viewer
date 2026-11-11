@@ -26,13 +26,13 @@
       <button class="rail-btn" title="Channels" data-icon="channels"></button>
       <button class="rail-btn" title="Communities" data-icon="communities"></button>
       <hr>
-      <button class="rail-btn" title="Business tools" data-icon="store"></button>
-      <button class="rail-btn" title="Advertise" data-icon="campaign"></button>
+      <button class="rail-btn" id="rail-memories" title="Memories" data-icon="history"></button>
+      <button class="rail-btn" id="rail-insights" title="Insights" data-icon="chart"></button>
     </div>
     <div class="rail-bottom">
       <button class="rail-btn" id="btn-media" title="Media" data-icon="media"></button>
       <button class="rail-btn" id="btn-settings" title="Settings" data-icon="settings"></button>
-      <button class="rail-btn rail-avatar" id="btn-profile" title="Profile"><span class="avatar sm" data-avatar="person"></span></button>
+      <button class="rail-btn rail-avatar" id="btn-profile" title="Profile"><span id="me-avatar"></span></button>
     </div>
   </nav>
 
@@ -48,7 +48,9 @@
       <label class="search-pill">
         <span data-icon="search"></span>
         <input id="chat-filter" type="text" placeholder="Search or start a new chat" autocomplete="off" spellcheck="false">
+        <button class="pill-btn" id="filter-btn" title="Search filters" data-icon="filter"></button>
       </label>
+      <div class="filter-pop" id="filter-pop" hidden></div>
     </div>
     <div class="chips" id="chips">
       <button class="chip on" data-filter="all">All</button>
@@ -80,8 +82,8 @@
       <div class="intro-tiles">
         <button class="tile" id="tile-import"><span data-icon="doc"></span><em>Import chat</em></button>
         <button class="tile" id="tile-media"><span data-icon="media"></span><em>All media</em></button>
+        <button class="tile" id="tile-insights"><span data-icon="chart"></span><em>Insights</em></button>
         <button class="tile" id="tile-settings"><span data-icon="settings"></span><em>Settings</em></button>
-        <button class="tile" id="tile-theme"><span data-icon="theme"></span><em>Switch theme</em></button>
       </div>
       <div class="intro-foot"><span data-icon="lock"></span><span id="intro-foot-text">Your chats never leave this device. Everything is read in your browser.</span></div>
     </section>
@@ -98,7 +100,7 @@
       <header class="convo-head">
         <button class="icon-btn back" id="btn-back" title="Back" data-icon="back"></button>
         <button class="convo-id" id="convo-id" title="Media, links and docs">
-          <span class="avatar md" id="convo-avatar" data-avatar="person"></span>
+          <span id="convo-avatar"></span>
           <span class="convo-title">
             <span class="name" id="convo-name"></span>
             <span class="sub" id="convo-sub"></span>
@@ -153,14 +155,27 @@
     <header class="panel-head">
       <button class="icon-btn g-close" title="Back" data-icon="back"></button>
       <h2>Media, links and docs</h2>
+      <button class="icon-btn g-find" title="Search" data-icon="search"></button>
       <button class="icon-btn g-sort" title="Filter and sort" data-icon="sort"></button>
+      <button class="icon-btn g-select" title="Select" data-icon="select"></button>
     </header>
     <div class="g-tabs">
       <button data-tab="media">Media</button>
       <button data-tab="docs">Docs</button>
       <button data-tab="links">Links</button>
     </div>
+    <div class="g-search" hidden><label class="search-pill"><span data-icon="search"></span><input type="text" placeholder="Search" autocomplete="off" spellcheck="false"></label></div>
+    <div class="g-thead" hidden></div>
     <div class="g-body"></div>
+    <div class="g-bar" hidden><span class="g-size"></span><span class="g-count"></span><span class="actions"><button class="icon-btn g-star"></button><button class="icon-btn g-dl"></button></span></div>
+  </aside>
+
+  <aside class="panel" id="contact-panel" hidden>
+    <header class="panel-head">
+      <button class="icon-btn" id="contact-close" title="Close" data-icon="close"></button>
+      <h2 id="contact-title">Contact info</h2>
+    </header>
+    <div class="panel-body" id="contact-body"></div>
   </aside>
 </div>
 
@@ -174,17 +189,47 @@
         <button data-tab="links">Links</button>
       </div>
       <div class="actions">
+        <button class="icon-btn g-find" title="Search" data-icon="search"></button>
         <button class="icon-btn g-sort" title="Filter and sort" data-icon="sort"></button>
+        <button class="icon-btn g-select" title="Select" data-icon="select"></button>
         <button class="icon-btn g-close" title="Close" data-icon="close"></button>
       </div>
     </header>
+    <div class="g-search" hidden><label class="search-pill"><span data-icon="search"></span><input type="text" placeholder="Search by name, caption or sender" autocomplete="off" spellcheck="false"></label></div>
+    <div class="g-thead" hidden></div>
     <div class="g-body"></div>
+    <div class="g-bar" hidden><span class="g-size"></span><span class="g-count"></span><span class="actions"><button class="icon-btn g-star"></button><button class="icon-btn g-dl"></button></span></div>
   </div>
+</div>
+
+<div class="media-wrap" id="insights-modal" hidden>
+  <div class="media-dialog insights viz-root">
+    <header class="media-head">
+      <div class="media-title"><div class="name">Insights</div><div class="sub" id="insights-sub"></div></div>
+      <div class="actions">
+        <select id="insights-scope" class="select" title="Which chat"></select>
+        <button class="icon-btn" id="insights-close" title="Close" data-icon="close"></button>
+      </div>
+    </header>
+    <div class="g-body" id="insights-body"></div>
+  </div>
+</div>
+<div class="viz-tip" id="viz-tip" hidden></div>
+
+<div class="lock-screen" id="lock-screen" hidden>
+  <form class="lock-box" id="lock-form">
+    <span class="lock-ico" data-icon="lock"></span>
+    <h2>Chat viewer is locked</h2>
+    <p>Enter your password to see your chats.</p>
+    <input class="field" id="lock-input" type="password" placeholder="Password" autocomplete="current-password">
+    <p class="err" id="lock-error"></p>
+    <button class="ok-btn" type="submit">Unlock</button>
+  </form>
 </div>
 
 <div class="lightbox" id="lightbox" hidden>
   <header class="lb-head">
-    <span class="avatar md" id="lb-avatar" data-avatar="person"></span>
+    <span id="lb-avatar"></span>
     <div class="lb-title"><div class="name" id="lb-name"></div><div class="sub" id="lb-sub"></div></div>
     <div class="actions">
       <button class="icon-btn" id="lb-goto" title="Go to message" data-icon="gotomsg"></button>
@@ -205,11 +250,16 @@
 <div class="toast" id="toast" hidden></div>
 <input type="file" id="file-input" accept=".zip,.txt,application/zip,text/plain" multiple hidden>
 <input type="file" id="wall-input" accept="image/*" hidden>
+<input type="file" id="avatar-input" accept="image/*" hidden>
 
 <script src="js/icons.js"></script>
 <script src="js/zip.js"></script>
 <script src="js/store.js"></script>
 <script src="js/parser.js"></script>
 <script src="js/app.js"></script>
+<script src="js/gallery.js"></script>
+<script src="js/insights.js"></script>
+<script src="js/extras.js"></script>
+<script>boot();</script>
 </body>
 </html>
