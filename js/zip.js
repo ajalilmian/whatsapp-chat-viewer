@@ -1,6 +1,9 @@
 /* Minimal ZIP reader: stored + deflate entries, zip64 aware.
    Reads lazily through a "source" (a local File, or a file on the viewer's server read with
-   HTTP range requests), so media is only fetched when it is shown. */
+   HTTP range requests), so media is only fetched when it is shown.
+   Some very large WhatsApp exports (over 4 GB) leave every file past the 4 GB mark out of the
+   zip's index, including _chat.txt. Those files are found again by walking the local headers
+   (see recover); the source can cache the result so this only happens once per file. */
 (function (global) {
   'use strict';
 
@@ -98,6 +101,7 @@
     let cdSize = dv.getUint32(eocd + 12, true);
     let cdOffset = dv.getUint32(eocd + 16, true);
     const count = dv.getUint16(eocd + 10, true);
+    let expected = count;
 
     if (count === 0xffff || cdSize === 0xffffffff || cdOffset === 0xffffffff) {
       const loc = eocd - 20;
@@ -105,6 +109,7 @@
         const at = Number(dv.getBigUint64(loc + 8, true));
         const z = new DataView(await source.read(at, at + 56));
         if (z.getUint32(0, true) === 0x06064b50) {
+          expected = Number(z.getBigUint64(32, true));
           cdSize = Number(z.getBigUint64(40, true));
           cdOffset = Number(z.getBigUint64(48, true));
         }
@@ -114,7 +119,7 @@
     const cd = new Uint8Array(await source.read(cdOffset, cdOffset + cdSize));
     const cv = new DataView(cd.buffer);
     const entries = new Map();
-    let p = 0;
+    let p = 0, records = 0, last = null;
     while (p + 46 <= cd.length && cv.getUint32(p, true) === 0x02014b50) {
       const method = cv.getUint16(p + 10, true);
       let compSize = cv.getUint32(p + 20, true);
@@ -139,14 +144,107 @@
         x += 4 + len;
       }
 
-      if (!name.endsWith('/')) {
-        entries.set(name, { name, method, compSize, size: fullSize, headerOffset, dataStart: -1 });
-      }
+      const entry = { name, method, compSize, size: fullSize, headerOffset, dataStart: -1 };
+      if (!name.endsWith('/')) entries.set(name, entry);
+      if (!last || headerOffset > last.headerOffset) last = entry;
+      records++;
       p += 46 + nameLen + extraLen + commentLen;
     }
 
-    return new Zip(source, entries);
+    const zip = new Zip(source, entries);
+    if (records < expected) {
+      // The index is missing entries: look for them after the last indexed file.
+      let from = 0;
+      if (last) from = (await zip._dataStart(last)) + last.compSize;
+      const scan = () => recover(source.read, from, cdOffset);
+      const found = source.recover ? await source.recover(scan) : await scan();
+      for (const [name, method, compSize, size, headerOffset, dataStart] of found) {
+        if (!entries.has(name)) entries.set(name, { name, method, compSize, size, headerOffset, dataStart });
+      }
+      zip.recovered = found;
+    }
+    return zip;
   }
 
-  global.Zip = { open, fromBlob, fromURL };
-})(window);
+  // Walks local file headers in [from, to) and returns
+  // [name, method, compSize, size, headerOffset, dataStart] for each file found. Sizes that
+  // were left out of the header (flag bit 3) are taken from the data descriptor after the data.
+  async function recover(read, from, to) {
+    const CHUNK = 8 << 20;
+    let buf = new Uint8Array(0), bufStart = from;
+    const have = (pos, n) => pos >= bufStart && pos + n <= bufStart + buf.length;
+    async function ensure(pos, n) {
+      if (have(pos, n)) return true;
+      const end = Math.min(to, pos + Math.max(n, CHUNK));
+      if (end - pos < n) return false;
+      buf = new Uint8Array(await read(pos, end));
+      bufStart = pos;
+      return buf.length >= n;
+    }
+    const u16 = pos => buf[pos - bufStart] | (buf[pos - bufStart + 1] << 8);
+    const u32 = pos => (u16(pos) | (u16(pos + 2) << 16)) >>> 0;
+    // Next "PK" b2 b3 signature at or after pos, or -1.
+    async function find(b2, b3, pos) {
+      while (pos + 4 <= to) {
+        if (!(await ensure(pos, 4))) return -1;
+        const n = buf.length - 3;
+        let i = pos - bufStart;
+        while ((i = buf.indexOf(0x50, i)) >= 0 && i < n) {
+          if (buf[i + 1] === 0x4b && buf[i + 2] === b2 && buf[i + 3] === b3) return bufStart + i;
+          i++;
+        }
+        pos = bufStart + n;
+      }
+      return -1;
+    }
+
+    const out = [];
+    let pos = from;
+    for (;;) {
+      const h = await find(3, 4, pos);
+      if (h < 0 || !(await ensure(h, 30))) break;
+      const flags = u16(h + 6), method = u16(h + 8), nameLen = u16(h + 26), extraLen = u16(h + 28);
+      let compSize = u32(h + 18), size = u32(h + 22);
+      if ((method !== 0 && method !== 8) || nameLen === 0 || nameLen > 1024) { pos = h + 1; continue; }
+      if (!(await ensure(h, 30 + nameLen + extraLen))) break;
+      const name = utf8.decode(buf.subarray(h - bufStart + 30, h - bufStart + 30 + nameLen));
+      const dataStart = h + 30 + nameLen + extraLen;
+      // zip64 sizes in the local header's extra field
+      for (let x = h + 30 + nameLen; x + 4 <= dataStart;) {
+        const id = u16(x), len = u16(x + 2);
+        if (id === 0x0001 && len >= 16 && size === 0xffffffff) {
+          size = u32(x + 4) + u32(x + 8) * 4294967296;
+          compSize = u32(x + 12) + u32(x + 16) * 4294967296;
+        }
+        x += 4 + len;
+      }
+      let next;
+      if ((flags & 8) && (compSize === 0 || compSize === 0xffffffff)) {
+        // Size is only in the data descriptor: find the one whose size matches its position.
+        let d = await find(7, 8, dataStart), ok = false;
+        while (d >= 0 && (await ensure(d, 16))) {
+          const len = d - dataStart, big = len >= 4294967296;
+          if (u32(d + 8) === len % 4294967296 && (!big || ((await ensure(d, 24)) && u32(d + 12) === Math.floor(len / 4294967296)))) {
+            compSize = len;
+            const is64 = big;
+            size = is64 ? u32(d + 16) + u32(d + 20) * 4294967296 : u32(d + 12);
+            next = d + (is64 ? 24 : 16);
+            ok = true;
+            break;
+          }
+          d = await find(7, 8, d + 1);
+        }
+        if (!ok) break;
+      } else {
+        next = dataStart + compSize + ((flags & 8) ? 16 : 0);
+      }
+      if (!name.endsWith('/')) out.push([name, method, compSize, size, h, dataStart]);
+      pos = next;
+    }
+    return out;
+  }
+
+  const api = { open, fromBlob, fromURL, recover };
+  if (typeof module !== 'undefined' && module.exports) module.exports = api; // used by server.js
+  else global.Zip = api;
+})(typeof window !== 'undefined' ? window : globalThis);

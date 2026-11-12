@@ -11,6 +11,7 @@ const path = require('path');
 const crypto = require('crypto');
 const net = require('net');
 const dns = require('dns').promises;
+const Zip = require('./js/zip.js');
 
 const PORT = Number(process.env.PORT) || 5178;
 const HOST = process.env.HOST || '127.0.0.1';
@@ -102,6 +103,36 @@ async function listChats() {
     } catch (e) { /* half-written or orphaned entry: ignore */ }
   }
   return out.sort((a, b) => a.addedAt - b.addedAt);
+}
+
+const recovering = new Map();
+function recoverIndex(id, bin) {
+  const cache = path.join(CHATS, id + '.index.json');
+  if (recovering.has(id)) return recovering.get(id);
+  const job = (async () => {
+    const st = await fsp.stat(bin);
+    try {
+      const c = JSON.parse(await fsp.readFile(cache, 'utf8'));
+      if (c.size === st.size && c.mtime === st.mtimeMs) return c.entries;
+    } catch (e) { /* not cached yet */ }
+    const fh = await fsp.open(bin, 'r');
+    try {
+      const source = {
+        size: st.size,
+        read: async (a, b) => {
+          const buf = Buffer.alloc(b - a);
+          const { bytesRead } = await fh.read(buf, 0, b - a, a);
+          return buf.buffer.slice(buf.byteOffset, buf.byteOffset + bytesRead);
+        },
+      };
+      const zip = await Zip.open(source);
+      const entries = zip.recovered || [];
+      await fsp.writeFile(cache, JSON.stringify({ size: st.size, mtime: st.mtimeMs, entries }));
+      return entries;
+    } finally { await fh.close(); }
+  })().finally(() => recovering.delete(id));
+  recovering.set(id, job);
+  return job;
 }
 
 // ---------------------------------------------------------------- screen lock
@@ -312,7 +343,14 @@ async function api(req, res, url) {
     if (parts.length === 2 && method === 'DELETE') {
       await fsp.rm(bin, { force: true });
       await fsp.rm(metaFile, { force: true });
+      await fsp.rm(path.join(CHATS, id + '.index.json'), { force: true });
       return json(res, 200, { ok: true });
+    }
+    // Files a broken zip index left out (see js/zip.js). Found here, next to the file,
+    // instead of making the browser download gigabytes to look for them.
+    if (parts.length === 3 && parts[2] === 'index' && method === 'GET') {
+      try { await fsp.stat(bin); } catch (e) { return json(res, 404, { error: 'No such chat' }); }
+      return json(res, 200, await recoverIndex(id, bin));
     }
     if (parts.length === 3 && parts[2] === 'file' && (method === 'GET' || method === 'HEAD')) {
       let st;

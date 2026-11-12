@@ -39,7 +39,19 @@
     return r;
   });
   const post = (path, body, method) => api(path, { method: method || 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
-  const remoteSource = (id, size) => Zip.fromURL('api/chats/' + encodeURIComponent(id) + '/file', size);
+  const remoteSource = (id, size) => Object.assign(Zip.fromURL('api/chats/' + encodeURIComponent(id) + '/file', size), {
+    recover: () => api('chats/' + encodeURIComponent(id) + '/index', { cache: 'no-store' }).then(r => r.json()),
+  });
+  // Browser mode: a broken zip index is rebuilt once and kept with the chat.
+  const localSource = (id, blob) => Object.assign(Zip.fromBlob(blob), {
+    recover: async scan => {
+      const key = 'zipidx:' + id + ':' + blob.size;
+      try { const hit = await tx('kv', 'readonly', s => s.get(key)); if (hit) return hit; } catch (e) { /* rebuild */ }
+      const found = await scan();
+      tx('kv', 'readwrite', s => s.put(found, key)).catch(() => {});
+      return found;
+    },
+  });
 
   // Browser-mode screen lock: a salted PBKDF2 hash kept in localStorage.
   const hex = buf => [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
@@ -88,12 +100,12 @@
         return list.map(c => ({ id: c.id, fileName: c.fileName, addedAt: c.addedAt, size: c.size, source: remoteSource(c.id, c.size) }));
       }
       const recs = await tx('chats', 'readonly', s => s.getAll());
-      return recs.map(r => ({ id: r.id, fileName: r.fileName, addedAt: r.addedAt, size: r.blob.size, source: Zip.fromBlob(r.blob) }));
+      return recs.map(r => ({ id: r.id, fileName: r.fileName, addedAt: r.addedAt, size: r.blob.size, source: localSource(r.id, r.blob) }));
     },
 
     // Returns the record straight away for a local read, plus a promise for the save.
     addChat(file) {
-      const rec = { id: chatId(file), fileName: file.name, addedAt: Date.now(), size: file.size, source: Zip.fromBlob(file) };
+      const rec = { id: chatId(file), fileName: file.name, addedAt: Date.now(), size: file.size, source: localSource(chatId(file), file) };
       let saved;
       if (this.mode === 'server') {
         saved = api('chats/' + encodeURIComponent(rec.id), {
@@ -110,6 +122,7 @@
 
     delChat(id) {
       if (this.mode === 'server') return api('chats/' + encodeURIComponent(id), { method: 'DELETE' });
+      tx('kv', 'readwrite', s => s.delete(IDBKeyRange.bound('zipidx:' + id + ':', 'zipidx:' + id + ':\uffff'))).catch(() => {});
       return tx('chats', 'readwrite', s => s.delete(id));
     },
 
