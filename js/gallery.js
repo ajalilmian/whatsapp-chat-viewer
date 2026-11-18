@@ -8,7 +8,7 @@ const gal = {
 };
 let galIO = null;
 const galHost = () => (gal.scope === 'all' ? dom.mediaModal : dom.infoPanel);
-const TAB_WORD = { media: 'Media', docs: 'Docs', links: 'Links' };
+const TAB_WORD = { media: 'Media', voice: 'Voice messages', docs: 'Docs', links: 'Links' };
 const itemKey = it => it.chat.sig + ':' + it.m.i;
 const whoOf = it => (it.chat.me && it.m.sender === it.chat.me ? 'You' : it.m.sender);
 
@@ -31,6 +31,7 @@ function openGallery(scope, tab, opts) {
   renderGallery();
 }
 function closeGallery(host) {
+  stopGalleryVoice();
   if (host === dom.mediaModal) {
     dom.mediaModal.hidden = true;
     if (!dom.infoPanel.hidden && view.chat) { resetGallery('chat'); renderGallery(); }
@@ -45,7 +46,7 @@ function galleryItems() {
   const q = lc(gal.q.trim());
   const items = [];
   for (const chat of chats) {
-    const idx = gal.tab === 'media' ? chat.visual : gal.tab === 'docs' ? chat.docs : chat.links;
+    const idx = { media: chat.visual, voice: chat.voice, docs: chat.docs, links: chat.links }[gal.tab] || [];
     for (const i of idx) {
       const m = chat.msgs[i];
       const out = !!chat.me && m.sender === chat.me;
@@ -66,6 +67,7 @@ function galleryItems() {
 }
 
 function renderGallery() {
+  if (gv.it && (gal.tab !== 'voice' || !gal.items.includes(gv.it))) stopGalleryVoice();
   const host = galHost(), body = $('.g-body', host);
   host.classList.toggle('selecting', gal.select);
   host.querySelectorAll('.g-tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === gal.tab));
@@ -77,7 +79,9 @@ function renderGallery() {
   }
   const head = $('.g-thead', host);
   head.hidden = gal.tab === 'media';
-  head.innerHTML = gal.tab === 'docs' ? '<span>Doc</span><span>Caption</span><span>Sent by</span>' : '<span>Link</span><span>Message</span><span>Sent by</span>';
+  head.innerHTML = gal.tab === 'docs' ? '<span>Doc</span><span>Caption</span><span>Sent by</span>'
+    : gal.tab === 'voice' ? '<span>Voice message</span><span></span><span>Sent by</span>'
+    : '<span>Link</span><span>Message</span><span>Sent by</span>';
 
   gal.items = galleryItems();
   gal.shown = 0; gal.lastKey = null; gal.cur = null;
@@ -89,7 +93,7 @@ function renderGallery() {
   body.scrollTop = 0;
   updateGalleryBar();
   if (!gal.items.length) {
-    const word = { media: 'media', docs: 'documents', links: 'links' }[gal.tab];
+    const word = { media: 'media', voice: 'voice messages', docs: 'documents', links: 'links' }[gal.tab];
     const narrowed = gal.sentBy !== 'all' || gal.show !== 'all' || gal.q.trim();
     body.appendChild(el('div', 'g-empty', '<div class="t">No ' + word + '</div><div class="s">' +
       (narrowed ? 'Nothing matches this filter.' : gal.scope === 'chat' ? TAB_WORD[gal.tab] + ' shared in this chat will appear here.' : TAB_WORD[gal.tab] + ' from your imported chats will appear here.') + '</div>' +
@@ -141,10 +145,19 @@ function galleryNode(it, k) {
   } else {
     const sent = '<div class="c3">' + senderAvatar(chat, m.sender, 'sm') + '<div class="tx"><div class="n">' + esc(who + (all && (chat.isGroup || who === 'You') ? ' • ' + chat.name : '')) + '</div>' +
       '<div class="m">' + esc(sentWhen(m, chat)) + '</div></div></div>';
-    const tools = '<div class="c4"><span class="stb">' + ICON.star + '</span><button class="icon-btn open" title="' + (gal.tab === 'docs' ? 'Open' : 'Open link in a new tab') + '">' + ICON.openNew + '</button>' +
+    const tools = '<div class="c4"><span class="stb">' + ICON.star + '</span><button class="icon-btn open" title="' + ({ docs: 'Open', voice: 'Go to message' }[gal.tab] || 'Open link in a new tab') + '">' + ICON.openNew + '</button>' +
       '<button class="icon-btn more" title="More">' + ICON.down + '</button></div>';
     const narrow = '<span class="nar"> · ' + esc(who) + ' · ' + esc(numericDate(m.ts, chat)) + '</span>';
-    if (gal.tab === 'docs') {
+    if (gal.tab === 'voice') {
+      const voiceNote = /(^|-)(PTT|AUDIO)-/i.test(m.file) || extOf(m.file) === 'opus';
+      const name = voiceNote ? 'Voice message' : (m.title || displayName(m.file));
+      const info = it.chat.peaks.get(norm(m.file));
+      node = el('div', 'g-row g-voice', cb + '<div class="c1"><button class="ficon k-voice gv-play" title="Play">' + ICON.play + '</button><div class="tx"><div class="n">' + esc(name) + '</div>' +
+        '<div class="m"><span class="gv-time">' + (info && info.dur ? fmtDur(info.dur) : '') + '</span><span class="gv-size">' + esc(fmtSize(it.size)) + '</span>' + narrow + '</div></div></div>' +
+        '<div class="c2"><div class="gv-wave"><div class="v-bars">' + barsHTML() + '</div><div class="v-bars on">' + barsHTML() + '</div></div></div>' + sent + tools);
+      if (info) paintGalleryVoice(node, info); else galIO.observe(node);
+      if (gv.it && itemKey(gv.it) === itemKey(it)) node.classList.add('gv-active');
+    } else if (gal.tab === 'docs') {
       const name = m.title || displayName(m.file), ext = extOf(m.file);
       node = el('div', 'g-row', cb + '<div class="c1"><span class="ficon k-' + (DOC_KIND[ext] || 'file') + '">' + ICON.doc + '</span><div class="tx"><div class="n">' + esc(name) + '</div>' +
         '<div class="m">' + esc(fmtSize(it.size) + ' • ' + ext.toUpperCase()) + narrow + '</div></div></div>' +
@@ -171,6 +184,10 @@ function galleryNode(it, k) {
 function loadGalleryNode(node) {
   const it = gal.items[+node.dataset.k];
   if (!it) return;
+  if (gal.tab === 'voice') {
+    voiceInfo(it.chat, it.m.file).then(info => { if (node.isConnected) paintGalleryVoice(node, info); });
+    return;
+  }
   if (gal.tab === 'links') {
     getLinkPreview(node.dataset.url).then(info => {
       if (!info || !node.isConnected) return;
@@ -191,6 +208,80 @@ function loadGalleryNode(node) {
     }
   }).catch(() => node.classList.add('loaded'));
 }
+
+// ---- voice messages: one player for the gallery, separate from the chat's
+const gv = { it: null, audio: new Audio(), raf: 0 };
+function paintGalleryVoice(node, info) {
+  if (info.peaks) node.querySelectorAll('.gv-wave .v-bars').forEach(group => {
+    const bars = group.children;
+    for (let k = 0; k < bars.length; k++) bars[k].style.height = Math.max(3, Math.round(info.peaks[k] * 22)) + 'px';
+  });
+  const t = $('.gv-time', node);
+  if (t && info.dur && !node.classList.contains('gv-active')) t.textContent = fmtDur(info.dur);
+}
+function galleryVoiceNode() {
+  if (!gv.it) return null;
+  const k = gal.items.indexOf(gv.it);
+  return k < 0 ? null : $('.g-body [data-k="' + k + '"]', galHost());
+}
+function syncGalleryVoice() {
+  const node = galleryVoiceNode();
+  if (!node) return;
+  const a = gv.audio, dur = isFinite(a.duration) ? a.duration : 0;
+  node.classList.add('gv-active');
+  node.classList.toggle('gv-playing', !a.paused);
+  const btn = $('.gv-play', node);
+  if (btn.dataset.s !== String(!a.paused)) { btn.dataset.s = String(!a.paused); btn.innerHTML = a.paused ? ICON.play : ICON.pause; btn.title = a.paused ? 'Play' : 'Pause'; }
+  $('.gv-wave', node).style.setProperty('--p', (dur ? clamp(a.currentTime / dur, 0, 1) * 100 : 0) + '%');
+  $('.gv-time', node).textContent = fmtDur(a.currentTime) + (dur ? ' / ' + fmtDur(dur) : '');
+}
+function loopGalleryVoice() {
+  syncGalleryVoice();
+  if (gv.it && !gv.audio.paused) gv.raf = requestAnimationFrame(loopGalleryVoice);
+}
+function stopGalleryVoice() {
+  const node = galleryVoiceNode();
+  gv.audio.pause();
+  cancelAnimationFrame(gv.raf);
+  if (node) {
+    node.classList.remove('gv-active', 'gv-playing');
+    const btn = $('.gv-play', node);
+    btn.dataset.s = 'false'; btn.innerHTML = ICON.play; btn.title = 'Play';
+    $('.gv-wave', node).style.setProperty('--p', '0%');
+    const info = gv.it.chat.peaks.get(norm(gv.it.m.file));
+    $('.gv-time', node).textContent = info && info.dur ? fmtDur(info.dur) : '';
+  }
+  gv.it = null;
+}
+async function playGalleryVoice(it, frac) {
+  if (gv.it && itemKey(gv.it) === itemKey(it)) {
+    if (frac != null && isFinite(gv.audio.duration)) { gv.audio.currentTime = frac * gv.audio.duration; syncGalleryVoice(); }
+    else if (gv.audio.paused) gv.audio.play(); else gv.audio.pause();
+    return;
+  }
+  stopGalleryVoice();
+  stopVoice();
+  gv.it = it;
+  try {
+    const url = await mediaURL(it.chat, it.m.file);
+    if (gv.it !== it) return;
+    gv.audio.src = url;
+    if (frac) gv.audio.addEventListener('loadedmetadata', () => { if (gv.it === it) gv.audio.currentTime = frac * gv.audio.duration; }, { once: true });
+    await gv.audio.play();
+  } catch (e) {
+    if (gv.it === it) { stopGalleryVoice(); toast("Couldn't play this audio in this browser"); }
+  }
+}
+gv.audio.addEventListener('play', loopGalleryVoice);
+gv.audio.addEventListener('pause', syncGalleryVoice);
+gv.audio.addEventListener('ended', () => {
+  const done = gv.it;
+  stopGalleryVoice();
+  // carry on with the next one in the list, like WhatsApp does in a chat
+  const k = done ? gal.items.indexOf(done) : -1;
+  const next = k >= 0 && gal.items[k + 1];
+  if (next && gal.tab === 'voice' && !galHost().hidden) playGalleryVoice(next);
+});
 
 // ---- selection
 function pickedItems() { return gal.items.filter(it => gal.picked.has(itemKey(it))); }
@@ -265,6 +356,7 @@ function galleryMenu(anchor, node, it) {
   const items = [{ label: 'Select', run: () => { if (!gal.select) setSelecting(true); togglePick(node, it); } }, '-'];
   if (gal.tab === 'links') items.push({ label: 'Open link in a new tab', run: () => window.open(linksOf(it)[0], '_blank', 'noopener') });
   else if (gal.tab === 'docs') items.push({ label: 'Open', run: () => openDoc(it.chat, it.m.file) });
+  else if (gal.tab === 'voice') items.push({ label: gv.it === it && !gv.audio.paused ? 'Pause' : 'Play', run: () => playGalleryVoice(it) });
   items.push({ label: 'Go to message', run: () => goToMessage(it.chat, it.m.i) });
   if (gal.tab === 'links') items.push({ label: 'Copy link', run: () => copyText(linksOf(it)[0], 'Link copied') });
   else items.push({ label: 'Download', run: () => downloadItems([it]) });
@@ -276,7 +368,7 @@ function bindGallery(host) {
   const body = $('.g-body', host);
   $('.g-tabs', host).addEventListener('click', e => {
     const b = e.target.closest('button');
-    if (b) { gal.tab = b.dataset.tab; gal.picked.clear(); renderGallery(); }
+    if (b) { stopGalleryVoice(); gal.tab = b.dataset.tab; gal.picked.clear(); renderGallery(); }
   });
   $('.g-close', host).addEventListener('click', () => closeGallery(host));
   $('.g-select', host).addEventListener('click', () => setSelecting(!gal.select));
@@ -323,6 +415,13 @@ function bindGallery(host) {
     const more = e.target.closest('.more');
     if (more) { e.stopPropagation(); galleryMenu(more, node, it); return; }
     if (gal.select) { togglePick(node, it); return; }
+    if (gal.tab === 'voice') {
+      const wave = e.target.closest('.gv-wave');
+      if (wave) { const r = wave.getBoundingClientRect(); playGalleryVoice(it, clamp((e.clientX - r.left) / r.width, 0, 1)); return; }
+      if (e.target.closest('.open')) { stopGalleryVoice(); goToMessage(it.chat, it.m.i); return; }
+      playGalleryVoice(it);
+      return;
+    }
     if (e.target.closest('.open')) {
       if (gal.tab === 'docs') openDoc(it.chat, it.m.file); else window.open(linksOf(it)[0], '_blank', 'noopener');
     } else if (gal.tab === 'media') showLightbox(gal.items, +node.dataset.k, gal.scope === 'all');

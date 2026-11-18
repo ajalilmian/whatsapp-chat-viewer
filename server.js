@@ -432,13 +432,17 @@ async function staticFile(req, res, url) {
 for (const dir of [CHATS, FILES, PREVIEWS]) fs.mkdirSync(dir, { recursive: true });
 try { lock = JSON.parse(fs.readFileSync(LOCK_FILE, 'utf8')); } catch (e) { lock = null; }
 
-http.createServer((req, res) => {
+const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://localhost');
   const run = url.pathname.startsWith('/api/') ? api(req, res, url) : staticFile(req, res, url);
   Promise.resolve(run).catch(err => {
     console.error(req.method, req.url, err.message);
     if (!res.headersSent) json(res, 500, { error: 'Server error' }); else res.destroy();
   });
-}).listen(PORT, HOST, () => {
+});
+// Node ends any request that takes longer than 5 minutes by default, which cut off uploads of
+// big exports (several GB) and threw them away. Headers still have to arrive within a minute.
+server.requestTimeout = 0;
+server.listen(PORT, HOST, () => {
   console.log('WhatsApp chat viewer on http://' + (HOST === '0.0.0.0' ? 'localhost' : HOST) + ':' + PORT + '  (data: ' + DATA + ')');
 });

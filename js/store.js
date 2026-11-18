@@ -104,14 +104,24 @@
     },
 
     // Returns the record straight away for a local read, plus a promise for the save.
-    addChat(file) {
+    addChat(file, onProgress) {
       const rec = { id: chatId(file), fileName: file.name, addedAt: Date.now(), size: file.size, source: localSource(chatId(file), file) };
       let saved;
       if (this.mode === 'server') {
-        saved = api('chats/' + encodeURIComponent(rec.id), {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/octet-stream', 'X-File-Name': encodeURIComponent(file.name) },
-          body: file,
+        // XHR rather than fetch: it reports upload progress, which matters for multi-GB files.
+        saved = new Promise((resolve, reject) => {
+          const x = new XMLHttpRequest();
+          x.open('PUT', 'api/chats/' + encodeURIComponent(rec.id));
+          x.setRequestHeader('Content-Type', 'application/octet-stream');
+          x.setRequestHeader('X-File-Name', encodeURIComponent(file.name));
+          if (onProgress) x.upload.onprogress = e => onProgress(e.loaded, e.lengthComputable ? e.total : file.size);
+          x.onload = () => {
+            if (x.status >= 200 && x.status < 300) resolve();
+            else { const e = new Error('Server error ' + x.status); e.status = x.status; reject(e); }
+          };
+          x.onerror = () => reject(new Error('The upload was interrupted'));
+          x.onabort = () => reject(new Error('The upload was cancelled'));
+          x.send(file);
         }).then(() => { rec.source = remoteSource(rec.id, rec.size); });
       } else {
         if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});

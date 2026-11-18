@@ -345,7 +345,7 @@
     chat.name = chat.baseName;
     chat.me = null;
     chat.counts = new Map();
-    chat.visual = []; chat.docs = []; chat.links = []; chat.calls = [];
+    chat.visual = []; chat.docs = []; chat.links = []; chat.calls = []; chat.voice = [];
     chat.linkMap = new Map();
     let groupish = false;
     for (const m of chat.msgs) {
@@ -358,6 +358,7 @@
       if (m.file && hasFile(chat, m.file)) {
         if (m.type === 'image' || m.type === 'video' || m.type === 'gif') chat.visual.push(m.i);
         else if (m.type === 'document') chat.docs.push(m.i);
+        else if (m.type === 'audio') chat.voice.push(m.i);
       }
       if (m.text && m.type !== 'deleted') {
         const urls = m.text.match(URL_RE);
@@ -978,6 +979,7 @@
       return;
     }
     stopVoice();
+    if (typeof stopGalleryVoice === 'function') stopGalleryVoice();
     const m = chat.msgs[i];
     const info = chat.peaks.get(norm(m.file));
     const mine = playing = { chat, i, dur: info ? info.dur : 0 };
@@ -1228,8 +1230,10 @@
     if (!/\.(zip|txt)$/i.test(file.name)) { toast('"' + file.name + '" is not a WhatsApp export (.zip or .txt)'); return null; }
     toast('Importing ' + file.name + '…', true);
     try {
-      const { rec, saved } = Store.addChat(file);
-      saved.catch(e => { console.error(e); toast("Imported, but it couldn't be saved for next time"); });
+      const job = Store.mode === 'server' ? uploadStarted(file) : null;
+      const { rec, saved } = Store.addChat(file, job && job.progress);
+      if (job) saved.then(job.done, job.failed);
+      else saved.catch(e => { console.error(e); toast("Imported, but it couldn't be saved for next time"); });
       const part = await loadPart(rec);
       hideToast();
       state.parts = state.parts.filter(p => p.rec.id !== rec.id); // importing the same file again replaces it
@@ -1259,6 +1263,48 @@
       return null;
     }
   }
+  // Saving a chat to the server can take many minutes for a big export. Show how far along it
+  // is, and warn before the page is closed, since closing it throws the upload away.
+  const uploads = new Set();
+  let uploadBar = null;
+  function paintUploads() {
+    if (!uploads.size) { if (uploadBar) uploadBar.hidden = true; return; }
+    if (!uploadBar) uploadBar = document.body.appendChild(el('div', 'upload-bar'));
+    uploadBar.hidden = false;
+    let sent = 0, total = 0;
+    for (const u of uploads) { sent += u.sent; total += u.total; }
+    const pct = total ? Math.floor(sent / total * 100) : 0;
+    const first = [...uploads][0];
+    uploadBar.innerHTML = '<div class="ub-text"><b>' + esc(uploads.size > 1 ? 'Saving ' + uploads.size + ' chats' : 'Saving “' + first.name + '”') + '</b>' +
+      '<span>' + pct + '% · ' + esc(fmtSize(sent)) + ' of ' + esc(fmtSize(total)) + ' · keep this page open</span></div>' +
+      '<div class="ub-track"><i style="width:' + pct + '%"></i></div>';
+  }
+  function uploadStarted(file) {
+    const u = { name: file.name.replace(/\.zip$/i, ''), sent: 0, total: file.size };
+    uploads.add(u);
+    paintUploads();
+    let last = 0;
+    return {
+      progress(sent, total) {
+        u.sent = sent; u.total = total || u.total;
+        const now = Date.now();
+        if (now - last > 250 || sent >= u.total) { last = now; paintUploads(); }
+      },
+      done() { uploads.delete(u); paintUploads(); toast('Saved “' + u.name + '”. It will be here next time.'); },
+      failed(e) {
+        console.error(e);
+        uploads.delete(u); paintUploads();
+        toast("Couldn't save “" + u.name + '” for next time: ' + (e && e.message ? e.message : 'upload failed') +
+          (e && e.status === 413 ? '' : '. You can still read it until you leave this page.'));
+      },
+    };
+  }
+  window.addEventListener('beforeunload', e => {
+    if (!uploads.size) return;
+    e.preventDefault();
+    e.returnValue = '';
+  });
+
   function removeChat(chat) {
     if (view.chat === chat) closeChat();
     chat.urls.forEach(p => p.then(u => { if (u.startsWith('blob:')) URL.revokeObjectURL(u); }).catch(() => {}));

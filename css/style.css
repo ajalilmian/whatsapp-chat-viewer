@@ -918,3 +918,24 @@ a.card:hover { filter: brightness(.97); }
   .drawer { bottom: calc(76px + env(safe-area-inset-bottom)); }
   .intro-foot { display: none; }
 }
+
+/* voice messages in the media explorer */
+.ficon.k-voice { color: #fff; background: var(--green); border: 0; border-radius: 50%; cursor: pointer; }
+.ficon.k-voice svg { width: 26px; height: 26px; }
+.g-voice .m .gv-size::before { content: " • "; }
+.g-voice .m .gv-time:empty + .gv-size::before { content: ""; }
+.g-voice.gv-active .n { color: var(--green); }
+.gv-wave { position: relative; height: 26px; --p: 0%; cursor: pointer; max-width: 260px; }
+.gv-wave .v-bars i { background: var(--text-2); opacity: .45; }
+.gv-wave .v-bars.on i { background: var(--green); opacity: 1; }
+.panel .g-voice .c2 { display: none !important; }
+
+/* upload progress for chats being saved to the server */
+.upload-bar { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); z-index: 60; width: min(420px, calc(100vw - 32px)); bottom: 92px;
+  background: var(--panel-bg, var(--side-bg)); color: var(--text); border-radius: 12px; padding: 12px 16px; box-shadow: 0 6px 24px rgba(0, 0, 0, .22); }
+.upload-bar .ub-text { display: flex; flex-direction: column; gap: 2px; font-size: 14px; min-width: 0; }
+.upload-bar .ub-text b { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.upload-bar .ub-text span { font-size: 12.5px; color: var(--text-2); }
+.upload-bar .ub-track { margin-top: 8px; height: 4px; border-radius: 2px; background: var(--line); overflow: hidden; }
+.upload-bar .ub-track i { display: block; height: 100%; background: var(--green); transition: width .2s; }
+@media (max-width: 760px) { .upload-bar { bottom: 160px; } body.chat-open .upload-bar { bottom: 140px; } }
